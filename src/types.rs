@@ -153,7 +153,7 @@ pub struct M3uEntry {
 impl M3uEntry {
     /// Returns `true` if this entry has at least one stream URL.
     pub fn has_url(&self) -> bool {
-        !self.urls.is_empty()
+        self.primary_url().is_some_and(|url| !url.trim().is_empty())
     }
 
     /// Returns the canonical primary URL for the entry.
@@ -163,6 +163,12 @@ impl M3uEntry {
 
     /// Sets the canonical primary URL for the entry.
     pub fn set_primary_url(&mut self, url: String) {
+        if url.trim().is_empty() {
+            if !self.urls.is_empty() {
+                self.urls.remove(0);
+            }
+            return;
+        }
         if self.urls.is_empty() {
             self.urls.push(url);
         } else {
@@ -289,12 +295,12 @@ where
     match value {
         None => {}
         Some(UrlField::Single(url)) => {
-            if !url.is_empty() {
+            if !url.trim().is_empty() {
                 urls.push(url);
             }
         }
         Some(UrlField::Multiple(values)) => {
-            urls.extend(values.into_iter().filter(|value| !value.is_empty()));
+            urls.extend(values.into_iter().filter(|value| !value.trim().is_empty()));
         }
     }
 
@@ -430,11 +436,45 @@ mod tests {
     }
 
     #[test]
+    fn has_url_rejects_blank_primary_url() {
+        let entry = M3uEntry {
+            urls: smallvec!["   ".into()],
+            ..Default::default()
+        };
+        assert!(!entry.has_url());
+    }
+
+    #[test]
+    fn set_primary_url_blank_clears_primary_slot() {
+        let mut entry = M3uEntry {
+            urls: smallvec![
+                "http://example.com/primary".into(),
+                "http://example.com/backup".into()
+            ],
+            ..Default::default()
+        };
+
+        entry.set_primary_url("   ".into());
+
+        assert_eq!(entry.primary_url(), Some("http://example.com/backup"));
+        assert_eq!(entry.urls.len(), 1);
+    }
+
+    #[test]
     fn deserialize_legacy_single_url_field() {
         let entry: M3uEntry =
             serde_json::from_str(r#"{"url":"http://example.com/legacy","name":"Legacy"}"#).unwrap();
 
         assert_eq!(entry.primary_url(), Some("http://example.com/legacy"));
         assert_eq!(entry.name.as_deref(), Some("Legacy"));
+    }
+
+    #[test]
+    fn deserializer_discards_blank_urls() {
+        let entry: M3uEntry =
+            serde_json::from_str(r#"{"urls":[" ","http://example.com/live"]}"#).unwrap();
+
+        assert_eq!(entry.urls.len(), 1);
+        assert_eq!(entry.primary_url(), Some("http://example.com/live"));
     }
 }
