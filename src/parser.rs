@@ -93,14 +93,13 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
             continue;
         }
 
-        // --- #EXTM3U header line ---
-        if let Some(rest) = line.strip_prefix("#EXTM3U") {
-            header_seen = true;
-            parse_header_attrs(rest, &mut header);
-            continue;
-        }
-
         if !header_seen {
+            if let Some(rest) = line.strip_prefix("#EXTM3U") {
+                header_seen = true;
+                parse_header_attrs(rest, &mut header);
+                continue;
+            }
+
             if matches!(mode, ParseMode::Strict) {
                 return Err(M3uError::MissingHeader);
             }
@@ -234,8 +233,10 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
 /// the iterator variant, but supported entry retention matches [`parse()`],
 /// including pre-`#EXTINF` `#KODIPROP`/`#EXTVLCOPT` state, `#WEBPROP` lines
 /// attached after `#EXTINF`, `#EXTGRP`-applied groups, and header catchup
-/// defaults, including raw URL-only entries. Orphan directive-only state
-/// without an `#EXTINF` context is still ignored.
+/// defaults, including raw URL-only entries. Only the first non-empty
+/// `#EXTM3U` line is treated as a header; later `#EXTM3U` lines are ignored
+/// like other stray directives. Orphan directive-only state without an
+/// `#EXTINF` context is still ignored.
 pub fn parse_iter(content: &str) -> M3uEntryIter<'_> {
     // Strip UTF-8 BOM if present.
     let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
@@ -243,6 +244,7 @@ pub fn parse_iter(content: &str) -> M3uEntryIter<'_> {
         lines: content.lines(),
         current_entry: None,
         current_entry_has_extinf: false,
+        header_seen: false,
         header: M3uHeader::default(),
         extgrp_groups: Vec::new(),
     }
@@ -253,6 +255,7 @@ pub struct M3uEntryIter<'a> {
     lines: std::str::Lines<'a>,
     current_entry: Option<M3uEntry>,
     current_entry_has_extinf: bool,
+    header_seen: bool,
     header: M3uHeader,
     extgrp_groups: Vec<String>,
 }
@@ -287,9 +290,14 @@ impl Iterator for M3uEntryIter<'_> {
                 continue;
             }
 
-            if let Some(rest) = line.strip_prefix("#EXTM3U") {
-                parse_header_attrs(rest, &mut self.header);
-                continue;
+            if !self.header_seen {
+                if let Some(rest) = line.strip_prefix("#EXTM3U") {
+                    parse_header_attrs(rest, &mut self.header);
+                    self.header_seen = true;
+                    continue;
+                }
+
+                self.header_seen = true;
             }
 
             if let Some(rest) = line.strip_prefix("#EXTINF:") {
@@ -1126,6 +1134,54 @@ http://example.com/raw
         assert_eq!(
             serde_json::to_value(&iter_entries[0]).unwrap(),
             serde_json::to_value(&parsed.entries[0]).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_ignores_late_extm3u_header_after_playlist_start() {
+        let content = r#"#EXTM3U
+http://example.com/raw
+#EXTM3U catchup="shift" catchup-days="7" catchup-source="http://catch.up/{utc}"
+"#;
+        let playlist = parse(content).unwrap();
+
+        assert!(playlist.header.catchup.is_none());
+        assert!(playlist.header.catchup_days.is_none());
+        assert!(playlist.header.catchup_source.is_none());
+        assert_eq!(playlist.entries.len(), 1);
+        assert_eq!(
+            playlist.entries[0].primary_url(),
+            Some("http://example.com/raw")
+        );
+        assert!(playlist.entries[0].catchup.is_none());
+        assert!(playlist.entries[0].catchup_days.is_none());
+        assert!(playlist.entries[0].catchup_source.is_none());
+    }
+
+    #[test]
+    fn parse_iter_matches_parse_when_late_extm3u_header_follows_earlier_entries() {
+        let content = r#"#EXTM3U
+#EXTINF:-1,First
+http://example.com/1
+#EXTINF:-1,Second
+http://example.com/2
+#EXTM3U catchup="shift" catchup-days="7"
+"#;
+        let parsed = parse(content).unwrap();
+        let iter_entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(parsed.header.catchup, None);
+        assert_eq!(parsed.header.catchup_days, None);
+        assert_eq!(iter_entries.len(), parsed.entries.len());
+        assert_eq!(
+            serde_json::to_value(&iter_entries).unwrap(),
+            serde_json::to_value(&parsed.entries).unwrap()
+        );
+        assert!(iter_entries.iter().all(|entry| entry.catchup.is_none()));
+        assert!(
+            iter_entries
+                .iter()
+                .all(|entry| entry.catchup_days.is_none())
         );
     }
 
