@@ -55,7 +55,7 @@ assert!(output.starts_with("#EXTM3U"));
 - `parse()` uses `ParseMode::Permissive` to accept common headerless IPTV playlists.
 - `parse_strict()` requires `#EXTM3U` as the first non-empty line.
 - `parse_with_mode()` lets callers choose explicitly.
-- bare URL lines without an active `#EXTINF` context are ignored instead of becoming entries
+- bare URL lines are accepted as URL-only entries
 
 ## Main Types
 
@@ -77,6 +77,7 @@ assert!(output.starts_with("#EXTM3U"));
 - all URLs in `entry.urls` are serialized, not just the first one
 - `stream_properties`, `vlc_options`, and `web_properties` are written back as directive lines
 - `groups` are normalized to a semicolon-delimited `group-title` on output
+- identified metadata-only entries are written back even when no URL is present
 - serialized `HashMap` metadata is sorted by key for deterministic output
 - unknown header and entry extras keep their original key casing across parse/write roundtrips
 

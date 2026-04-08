@@ -63,8 +63,8 @@ pub fn write(playlist: &M3uPlaylist) -> String {
 
     // Channel entries.
     for entry in &playlist.entries {
-        // Skip entries without a URL (matches TS behavior).
-        if !entry.has_url() {
+        // Skip only entries that have neither a URL nor identifying metadata.
+        if !entry.has_url() && !entry.is_identified() {
             continue;
         }
 
@@ -313,16 +313,36 @@ mod tests {
     }
 
     #[test]
-    fn write_skips_entries_without_url() {
+    fn write_skips_unidentified_entries_without_url() {
         let playlist = M3uPlaylist {
             header: M3uHeader::default(),
             entries: vec![M3uEntry {
-                name: Some("No URL".into()),
                 ..Default::default()
             }],
         };
         let output = write(&playlist);
         assert_eq!(output, "#EXTM3U");
+    }
+
+    #[test]
+    fn write_preserves_identified_entries_without_url() {
+        let playlist = M3uPlaylist {
+            header: M3uHeader::default(),
+            entries: vec![M3uEntry {
+                name: Some("No URL".into()),
+                tvg_id: Some("no-url".into()),
+                extras: {
+                    let mut extras = std::collections::HashMap::new();
+                    extras.insert("Vendor-Key".to_string(), "value".to_string());
+                    extras
+                },
+                ..Default::default()
+            }],
+        };
+        let output = write(&playlist);
+
+        assert!(output.contains(r#"#EXTINF:-1 tvg-id="no-url" Vendor-Key="value",No URL"#));
+        assert!(!output.contains("http://"));
     }
 
     #[test]
@@ -400,6 +420,27 @@ http://example.com/stream"#;
             reparsed.entries[0].catchup_source.as_deref(),
             Some("http://example.com/{utc}")
         );
+    }
+
+    #[test]
+    fn roundtrip_preserves_metadata_only_entries() {
+        let original = r#"#EXTM3U
+#EXTINF:-1 tvg-id="meta-only" Vendor-Key="value",Metadata Only"#;
+
+        let parsed = crate::parse(original).unwrap();
+        let written = write(&parsed);
+        let reparsed = crate::parse(&written).unwrap();
+        let entry = &reparsed.entries[0];
+
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(reparsed.entries.len(), 1);
+        assert_eq!(entry.tvg_id.as_deref(), Some("meta-only"));
+        assert_eq!(entry.name.as_deref(), Some("Metadata Only"));
+        assert_eq!(
+            entry.extras.get("Vendor-Key").map(String::as_str),
+            Some("value")
+        );
+        assert!(!written.contains("http://"));
     }
 
     #[test]

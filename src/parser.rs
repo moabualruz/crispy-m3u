@@ -199,6 +199,16 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
         }
 
         // --- URL line ---
+        if is_url(line) {
+            // Minimal M3U playlists can be raw URL lists without `#EXTINF`.
+            if current_entry.is_none() && !current_entry_has_extinf {
+                let mut entry = M3uEntry::default();
+                entry.urls.push(line.to_string());
+                entries.push(entry);
+                continue;
+            }
+        }
+
         if is_url(line) && should_accept_url_line(current_entry.as_ref(), current_entry_has_extinf)
         {
             let entry = current_entry.get_or_insert_with(M3uEntry::default);
@@ -293,6 +303,12 @@ impl Iterator for M3uEntryIter<'_> {
 
             if line.starts_with('#') {
                 continue;
+            }
+
+            if is_url(line) && self.current_entry.is_none() && !self.current_entry_has_extinf {
+                let mut entry = M3uEntry::default();
+                entry.urls.push(line.to_string());
+                return Some(entry);
             }
 
             if is_url(line)
@@ -785,10 +801,14 @@ http://example.com/stream3
     }
 
     #[test]
-    fn parse_discards_bare_url_without_extinf_context() {
+    fn parse_accepts_bare_url_without_extinf_context() {
         let content = "#EXTM3U\nhttp://example.com/raw\n";
         let playlist = parse(content).unwrap();
-        assert!(playlist.entries.is_empty());
+        assert_eq!(playlist.entries.len(), 1);
+        assert_eq!(
+            playlist.entries[0].primary_url(),
+            Some("http://example.com/raw")
+        );
     }
 
     #[test]
@@ -981,10 +1001,27 @@ https://stream.example.com/cnn
     }
 
     #[test]
-    fn parse_iter_skips_bare_url_without_extinf_context() {
+    fn parse_iter_accepts_bare_url_without_extinf_context() {
         let content = "#EXTM3U\nhttp://example.com/raw\n";
         let entries: Vec<M3uEntry> = parse_iter(content).collect();
-        assert!(entries.is_empty());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].primary_url(), Some("http://example.com/raw"));
+    }
+
+    #[test]
+    fn parse_accepts_multiple_bare_urls_as_distinct_entries() {
+        let content = "#EXTM3U\nhttp://example.com/1\nhttp://example.com/2\n";
+        let playlist = parse(content).unwrap();
+
+        assert_eq!(playlist.entries.len(), 2);
+        assert_eq!(
+            playlist.entries[0].primary_url(),
+            Some("http://example.com/1")
+        );
+        assert_eq!(
+            playlist.entries[1].primary_url(),
+            Some("http://example.com/2")
+        );
     }
 
     #[test]
