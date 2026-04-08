@@ -21,6 +21,9 @@ It focuses on the metadata commonly seen in real IPTV playlists, not just the mi
   - `group-title`
   - catchup fields
   - provider-specific extra attributes
+- multi-URL entries and directive-backed metadata (`#KODIPROP`, `#EXTVLCOPT`, `#WEBPROP`)
+- deterministic serialization for map-backed metadata
+- safe attribute escaping for quotes, backslashes, and line breaks
 
 ## Installation
 
@@ -51,6 +54,7 @@ assert!(output.starts_with("#EXTM3U"));
 - `parse()` uses `ParseMode::Permissive` to accept common headerless IPTV playlists.
 - `parse_strict()` requires `#EXTM3U` as the first non-empty line.
 - `parse_with_mode()` lets callers choose explicitly.
+- bare URL lines without an active `#EXTINF` context are ignored instead of becoming entries
 
 ## Main Types
 
@@ -66,6 +70,13 @@ assert!(output.starts_with("#EXTM3U"));
 - normalizing or cleaning playlists before further processing
 - converting raw M3U into shared data models
 - round-tripping playlists after edits
+
+## Writer Notes
+
+- all URLs in `entry.urls` are serialized, not just the first one
+- `stream_properties`, `vlc_options`, and `web_properties` are written back as directive lines
+- `groups` are normalized to a semicolon-delimited `group-title` on output
+- serialized `HashMap` metadata is sorted by key for deterministic output
 
 ## Related Crates
 

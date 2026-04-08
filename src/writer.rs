@@ -3,7 +3,9 @@
 //! Generates valid M3U/M3U8 playlist strings from structured data.
 //! Faithfully translates `@iptv/playlist`'s `writeM3U` function.
 
-use crate::types::M3uPlaylist;
+use std::collections::HashMap;
+
+use crate::types::{M3uEntry, M3uPlaylist};
 
 /// Write an [`M3uPlaylist`] to a valid M3U string.
 ///
@@ -42,17 +44,29 @@ pub fn write(playlist: &M3uPlaylist) -> String {
         write_attr(&mut out, "x-tvg-url", epg_url);
     }
 
+    write_optional_attr(&mut out, "catchup", playlist.header.catchup.as_deref());
+    write_optional_attr(
+        &mut out,
+        "catchup-days",
+        playlist.header.catchup_days.as_deref(),
+    );
+    write_optional_attr(
+        &mut out,
+        "catchup-source",
+        playlist.header.catchup_source.as_deref(),
+    );
+
     // Extra header attributes.
-    for (key, value) in &playlist.header.extras {
+    for (key, value) in sorted_pairs(&playlist.header.extras) {
         write_attr(&mut out, key, value);
     }
 
     // Channel entries.
     for entry in &playlist.entries {
         // Skip entries without a URL (matches TS behavior).
-        let Some(url) = entry.primary_url() else {
+        if !entry.has_url() {
             continue;
-        };
+        }
 
         out.push_str("\n#EXTINF:");
 
@@ -77,7 +91,8 @@ pub fn write(playlist: &M3uPlaylist) -> String {
         write_optional_attr(&mut out, "tvg-logo", entry.tvg_logo.as_deref());
         write_optional_attr(&mut out, "tvg-rec", entry.tvg_rec.as_deref());
         write_optional_attr(&mut out, "tvg-chno", entry.tvg_chno.as_deref());
-        write_optional_attr(&mut out, "group-title", entry.group_title.as_deref());
+        let group_title = normalized_group_title(entry);
+        write_optional_attr(&mut out, "group-title", group_title.as_deref());
         write_optional_attr(&mut out, "tvg-url", entry.tvg_url.as_deref());
         write_optional_attr(&mut out, "timeshift", entry.timeshift.as_deref());
         write_optional_attr(&mut out, "catchup", entry.catchup.as_deref());
@@ -123,7 +138,7 @@ pub fn write(playlist: &M3uPlaylist) -> String {
         );
 
         // Extra attributes.
-        for (key, value) in &entry.extras {
+        for (key, value) in sorted_pairs(&entry.extras) {
             write_attr(&mut out, key, value);
         }
 
@@ -133,17 +148,23 @@ pub fn write(playlist: &M3uPlaylist) -> String {
             out.push_str(name);
         }
 
-        // Web properties (as #WEBPROP: lines).
-        for (key, value) in &entry.web_properties {
-            out.push_str("\n#WEBPROP:");
-            out.push_str(key);
-            out.push('=');
-            out.push_str(value);
+        for (key, value) in sorted_pairs(&entry.stream_properties) {
+            write_directive(&mut out, "#KODIPROP:", key, value);
         }
 
-        // URL line.
-        out.push('\n');
-        out.push_str(url);
+        for (key, value) in sorted_pairs(&entry.vlc_options) {
+            write_directive(&mut out, "#EXTVLCOPT:", key, value);
+        }
+
+        // Web properties (as #WEBPROP: lines).
+        for (key, value) in sorted_pairs(&entry.web_properties) {
+            write_directive(&mut out, "#WEBPROP:", key, value);
+        }
+
+        for url in &entry.urls {
+            out.push('\n');
+            out.push_str(url);
+        }
     }
 
     out
@@ -158,7 +179,7 @@ fn write_attr(out: &mut String, key: &str, value: &str) {
     out.push(' ');
     out.push_str(key);
     out.push_str("=\"");
-    out.push_str(value);
+    out.push_str(&escape_attr_value(value));
     out.push('"');
 }
 
@@ -167,6 +188,14 @@ fn write_optional_attr(out: &mut String, key: &str, value: Option<&str>) {
     if let Some(v) = value {
         write_attr(out, key, v);
     }
+}
+
+fn write_directive(out: &mut String, prefix: &str, key: &str, value: &str) {
+    out.push('\n');
+    out.push_str(prefix);
+    out.push_str(key);
+    out.push('=');
+    out.push_str(value);
 }
 
 /// Write an integer without allocating a string (itoa-style).
@@ -181,6 +210,40 @@ fn write_int(out: &mut String, n: i64) {
 fn estimate_capacity(playlist: &M3uPlaylist) -> usize {
     // ~200 bytes per entry on average + header.
     200 * playlist.entries.len() + 128
+}
+
+fn escape_attr_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+
+    escaped
+}
+
+fn normalized_group_title(entry: &M3uEntry) -> Option<String> {
+    if !entry.groups.is_empty() {
+        return Some(entry.groups.join(";"));
+    }
+
+    entry.group_title.clone()
+}
+
+fn sorted_pairs(map: &HashMap<String, String>) -> Vec<(&str, &str)> {
+    let mut pairs: Vec<_> = map
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    pairs.sort_unstable_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+    pairs
 }
 
 #[cfg(test)]
@@ -207,6 +270,25 @@ mod tests {
         };
         let output = write(&playlist);
         assert_eq!(output, r#"#EXTM3U x-tvg-url="http://epg.com/guide.xml""#);
+    }
+
+    #[test]
+    fn write_header_catchup_defaults() {
+        let playlist = M3uPlaylist {
+            header: M3uHeader {
+                catchup: Some("shift".into()),
+                catchup_days: Some("7".into()),
+                catchup_source: Some("http://example.com/{utc}".into()),
+                ..Default::default()
+            },
+            entries: vec![],
+        };
+
+        let output = write(&playlist);
+        assert_eq!(
+            output,
+            r#"#EXTM3U catchup="shift" catchup-days="7" catchup-source="http://example.com/{utc}""#
+        );
     }
 
     #[test]
@@ -318,5 +400,173 @@ http://example.com/stream"#;
             reparsed.entries[0].catchup_source.as_deref(),
             Some("http://example.com/{utc}")
         );
+    }
+
+    #[test]
+    fn write_preserves_multi_url_and_directive_metadata_on_roundtrip() {
+        let mut stream_properties = std::collections::HashMap::new();
+        stream_properties.insert(
+            "inputstream.adaptive.manifest_type".to_string(),
+            "hls".to_string(),
+        );
+        stream_properties.insert(
+            "inputstream".to_string(),
+            "inputstream.adaptive".to_string(),
+        );
+
+        let mut vlc_options = std::collections::HashMap::new();
+        vlc_options.insert("http-user-agent".to_string(), "VLC/3.0".to_string());
+
+        let mut web_properties = std::collections::HashMap::new();
+        web_properties.insert("web-player".to_string(), "html5".to_string());
+
+        let playlist = M3uPlaylist {
+            header: M3uHeader::default(),
+            entries: vec![M3uEntry {
+                name: Some("Multi".into()),
+                urls: smallvec![
+                    "http://example.com/primary".into(),
+                    "http://example.com/backup".into()
+                ],
+                groups: vec!["News".into(), "Local".into()],
+                stream_properties,
+                vlc_options,
+                web_properties,
+                ..Default::default()
+            }],
+        };
+
+        let written = write(&playlist);
+        let reparsed = crate::parse(&written).unwrap();
+        let entry = &reparsed.entries[0];
+
+        assert_eq!(
+            entry.urls.as_slice(),
+            &[
+                "http://example.com/primary".to_string(),
+                "http://example.com/backup".to_string()
+            ]
+        );
+        assert_eq!(entry.groups, vec!["News", "Local"]);
+        assert_eq!(
+            entry
+                .stream_properties
+                .get("inputstream")
+                .map(String::as_str),
+            Some("inputstream.adaptive")
+        );
+        assert_eq!(
+            entry
+                .stream_properties
+                .get("inputstream.adaptive.manifest_type")
+                .map(String::as_str),
+            Some("hls")
+        );
+        assert_eq!(
+            entry.vlc_options.get("http-user-agent").map(String::as_str),
+            Some("VLC/3.0")
+        );
+        assert_eq!(
+            entry.web_properties.get("web-player").map(String::as_str),
+            Some("html5")
+        );
+    }
+
+    #[test]
+    fn write_escapes_attributes_and_roundtrips_original_values() {
+        let mut extras = std::collections::HashMap::new();
+        extras.insert("note".to_string(), "Line 1\n\"Quoted\" \\ path".to_string());
+
+        let playlist = M3uPlaylist {
+            header: M3uHeader {
+                extras: {
+                    let mut header_extras = std::collections::HashMap::new();
+                    header_extras.insert("description".to_string(), "Header\r\nValue".to_string());
+                    header_extras
+                },
+                ..Default::default()
+            },
+            entries: vec![M3uEntry {
+                name: Some("Escaped".into()),
+                urls: smallvec!["http://example.com/escaped".into()],
+                tvg_name: Some("Quoted \"Name\"\nLine".into()),
+                extras,
+                ..Default::default()
+            }],
+        };
+
+        let written = write(&playlist);
+        assert!(written.contains(r#"description="Header\r\nValue""#));
+        assert!(written.contains(r#"tvg-name="Quoted \"Name\"\nLine""#));
+        assert!(written.contains(r#"note="Line 1\n\"Quoted\" \\ path""#));
+
+        let reparsed = crate::parse(&written).unwrap();
+        let entry = &reparsed.entries[0];
+        assert_eq!(
+            reparsed.header.extras.get("description"),
+            Some(&"Header\r\nValue".to_string())
+        );
+        assert_eq!(entry.tvg_name.as_deref(), Some("Quoted \"Name\"\nLine"));
+        assert_eq!(
+            entry.extras.get("note"),
+            Some(&"Line 1\n\"Quoted\" \\ path".to_string())
+        );
+    }
+
+    #[test]
+    fn write_orders_map_backed_metadata_deterministically() {
+        let playlist = M3uPlaylist {
+            header: M3uHeader {
+                extras: {
+                    let mut extras = std::collections::HashMap::new();
+                    extras.insert("z-last".to_string(), "2".to_string());
+                    extras.insert("a-first".to_string(), "1".to_string());
+                    extras
+                },
+                ..Default::default()
+            },
+            entries: vec![M3uEntry {
+                name: Some("Ordered".into()),
+                urls: smallvec!["http://example.com/ordered".into()],
+                extras: {
+                    let mut extras = std::collections::HashMap::new();
+                    extras.insert("z-extra".to_string(), "2".to_string());
+                    extras.insert("a-extra".to_string(), "1".to_string());
+                    extras
+                },
+                stream_properties: {
+                    let mut properties = std::collections::HashMap::new();
+                    properties.insert("z-prop".to_string(), "2".to_string());
+                    properties.insert("a-prop".to_string(), "1".to_string());
+                    properties
+                },
+                vlc_options: {
+                    let mut options = std::collections::HashMap::new();
+                    options.insert("z-opt".to_string(), "2".to_string());
+                    options.insert("a-opt".to_string(), "1".to_string());
+                    options
+                },
+                web_properties: {
+                    let mut properties = std::collections::HashMap::new();
+                    properties.insert("z-web".to_string(), "2".to_string());
+                    properties.insert("a-web".to_string(), "1".to_string());
+                    properties
+                },
+                ..Default::default()
+            }],
+        };
+
+        let written = write(&playlist);
+        let expected = r#"#EXTM3U a-first="1" z-last="2"
+#EXTINF:-1 a-extra="1" z-extra="2",Ordered
+#KODIPROP:a-prop=1
+#KODIPROP:z-prop=2
+#EXTVLCOPT:a-opt=1
+#EXTVLCOPT:z-opt=2
+#WEBPROP:a-web=1
+#WEBPROP:z-web=2
+http://example.com/ordered"#;
+
+        assert_eq!(written, expected);
     }
 }

@@ -78,6 +78,7 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
     let mut entries: Vec<M3uEntry> = Vec::new();
     let mut header = M3uHeader::default();
     let mut current_entry: Option<M3uEntry> = None;
+    let mut current_entry_has_extinf = false;
     let mut header_seen = false;
     // Persistent EXTGRP groups that apply until cleared by a new EXTGRP or
     // overridden by group-title in an EXTINF line.
@@ -126,7 +127,6 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
                 }
                 _ => None,
             };
-
             let mut entry = M3uEntry::default();
             parse_extinf(rest, &mut entry);
 
@@ -137,6 +137,7 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
             }
 
             current_entry = Some(entry);
+            current_entry_has_extinf = true;
             continue;
         }
 
@@ -198,7 +199,8 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
         }
 
         // --- URL line ---
-        if is_url(line) {
+        if is_url(line) && should_accept_url_line(current_entry.as_ref(), current_entry_has_extinf)
+        {
             let entry = current_entry.get_or_insert_with(M3uEntry::default);
 
             entry.urls.push(line.to_string());
@@ -246,6 +248,7 @@ pub fn parse_iter(content: &str) -> M3uEntryIter<'_> {
     M3uEntryIter {
         lines: content.lines(),
         current_entry: None,
+        current_entry_has_extinf: false,
     }
 }
 
@@ -253,6 +256,7 @@ pub fn parse_iter(content: &str) -> M3uEntryIter<'_> {
 pub struct M3uEntryIter<'a> {
     lines: std::str::Lines<'a>,
     current_entry: Option<M3uEntry>,
+    current_entry_has_extinf: bool,
 }
 
 impl Iterator for M3uEntryIter<'_> {
@@ -279,6 +283,7 @@ impl Iterator for M3uEntryIter<'_> {
                 let mut entry = M3uEntry::default();
                 parse_extinf(rest, &mut entry);
                 self.current_entry = Some(entry);
+                self.current_entry_has_extinf = true;
 
                 if to_yield.is_some() {
                     return to_yield;
@@ -290,7 +295,12 @@ impl Iterator for M3uEntryIter<'_> {
                 continue;
             }
 
-            if is_url(line) {
+            if is_url(line)
+                && should_accept_url_line(
+                    self.current_entry.as_ref(),
+                    self.current_entry_has_extinf,
+                )
+            {
                 let entry = self.current_entry.get_or_insert_with(M3uEntry::default);
                 entry.urls.push(line.to_string());
                 continue;
@@ -379,17 +389,22 @@ fn parse_extinf(rest: &str, entry: &mut M3uEntry) {
 /// Skips commas inside quoted attribute values.
 fn find_name_comma(s: &str) -> Option<usize> {
     let mut in_quotes = false;
-    let mut last_comma = None;
+    let mut escaped = false;
 
     for (i, ch) in s.char_indices() {
         match ch {
-            '"' => in_quotes = !in_quotes,
-            ',' if !in_quotes => last_comma = Some(i),
+            '\\' if in_quotes => escaped = !escaped,
+            '"' if !escaped => in_quotes = !in_quotes,
+            ',' if !in_quotes => return Some(i),
             _ => {}
+        }
+
+        if ch != '\\' {
+            escaped = false;
         }
     }
 
-    last_comma
+    None
 }
 
 /// Parse the duration value from the beginning of the attribute string.
@@ -427,15 +442,15 @@ fn parse_attributes(s: &str) -> Vec<(String, String)> {
             break;
         }
 
-        // Look for key=value where key is alphanumeric/dash/underscore.
         let key_start = i;
-        while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-' || bytes[i] == b'_')
-        {
+        while i < len && bytes[i] != b'=' && bytes[i] != b' ' && bytes[i] != b'\t' {
             i += 1;
         }
 
         if i >= len || bytes[i] != b'=' || i == key_start {
-            i += 1;
+            while i < len && bytes[i] != b' ' && bytes[i] != b'\t' {
+                i += 1;
+            }
             continue;
         }
 
@@ -449,15 +464,9 @@ fn parse_attributes(s: &str) -> Vec<(String, String)> {
         // Value: either quoted or unquoted.
         if bytes[i] == b'"' {
             i += 1; // skip opening quote
-            let val_start = i;
-            while i < len && bytes[i] != b'"' {
-                i += 1;
-            }
-            let value = &s[val_start..i];
-            if i < len {
-                i += 1; // skip closing quote
-            }
-            result.push((key.to_string(), value.to_string()));
+            let (value, next_index) = parse_quoted_attribute_value(s, i);
+            i = next_index;
+            result.push((key.to_string(), value));
         } else {
             // Unquoted value: read until space or end.
             let val_start = i;
@@ -470,6 +479,40 @@ fn parse_attributes(s: &str) -> Vec<(String, String)> {
     }
 
     result
+}
+
+fn parse_quoted_attribute_value(s: &str, start: usize) -> (String, usize) {
+    let mut value = String::new();
+    let mut escaped = false;
+
+    for (offset, ch) in s[start..].char_indices() {
+        let absolute = start + offset;
+
+        if escaped {
+            value.push(match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                '"' => '"',
+                other => other,
+            });
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '"' => return (value, absolute + ch.len_utf8()),
+            other => value.push(other),
+        }
+    }
+
+    if escaped {
+        value.push('\\');
+    }
+
+    (value, s.len())
 }
 
 /// Set a known attribute on an `M3uEntry`, or store it in `extras`.
@@ -572,6 +615,10 @@ fn apply_catchup_inheritance(header: &M3uHeader, entries: &mut [M3uEntry]) {
             entry.catchup_source = Some(s.clone());
         }
     }
+}
+
+fn should_accept_url_line(entry: Option<&M3uEntry>, has_extinf_context: bool) -> bool {
+    has_extinf_context || entry.is_some_and(M3uEntry::is_identified)
 }
 
 /// Check if a line looks like a stream URL.
@@ -693,6 +740,24 @@ http://example.com/stream3
         assert_eq!(ch.urls[0], "http://example.com/stream1");
         assert_eq!(ch.urls[1], "http://example.com/stream2");
         assert_eq!(ch.urls[2], "http://example.com/stream3");
+    }
+
+    #[test]
+    fn parse_discards_bare_url_without_extinf_context() {
+        let content = "#EXTM3U\nhttp://example.com/raw\n";
+        let playlist = parse(content).unwrap();
+        assert!(playlist.entries.is_empty());
+    }
+
+    #[test]
+    fn parse_discards_url_with_only_pre_extinf_directives() {
+        let content = "\
+#EXTM3U
+#KODIPROP:inputstream=inputstream.adaptive
+http://example.com/raw
+";
+        let playlist = parse(content).unwrap();
+        assert!(playlist.entries.is_empty());
     }
 
     #[test]
@@ -874,6 +939,13 @@ https://stream.example.com/cnn
     }
 
     #[test]
+    fn parse_iter_skips_bare_url_without_extinf_context() {
+        let content = "#EXTM3U\nhttp://example.com/raw\n";
+        let entries: Vec<M3uEntry> = parse_iter(content).collect();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
     fn is_url_detects_protocols() {
         assert!(is_url("http://example.com"));
         assert!(is_url("https://example.com"));
@@ -894,6 +966,19 @@ https://stream.example.com/cnn
         assert_eq!(attrs.len(), 2);
         assert_eq!(attrs[0], ("tvg-id".to_string(), "hello".to_string()));
         assert_eq!(attrs[1], ("group-title".to_string(), "world".to_string()));
+    }
+
+    #[test]
+    fn parse_attributes_unescapes_backslash_sequences() {
+        let attrs = parse_attributes(r#"tvg-name="Quoted \"Name\"\nLine\\Path""#);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(
+            attrs[0],
+            (
+                "tvg-name".to_string(),
+                "Quoted \"Name\"\nLine\\Path".to_string()
+            )
+        );
     }
 
     #[test]
@@ -1168,6 +1253,36 @@ http://example.com/prov
         assert_eq!(ch.provider_logo.as_deref(), Some("http://logo.com/p.png"));
         assert_eq!(ch.provider_countries.as_deref(), Some("US,UK"));
         assert_eq!(ch.provider_languages.as_deref(), Some("en,fr"));
+    }
+
+    #[test]
+    fn parse_name_keeps_commas_after_first_separator() {
+        let content = r#"#EXTM3U
+#EXTINF:-1 tvg-id="ch1",Channel 1, News, Live
+http://example.com/live
+"#;
+        let playlist = parse(content).unwrap();
+        assert_eq!(
+            playlist.entries[0].name.as_deref(),
+            Some("Channel 1, News, Live")
+        );
+    }
+
+    #[test]
+    fn parse_dotted_extinf_extra_attribute_names() {
+        let content = r#"#EXTM3U
+#EXTINF:-1 inputstream.adaptive.manifest_type="hls",Dotted Attr
+http://example.com/dotted
+"#;
+        let playlist = parse(content).unwrap();
+        let entry = &playlist.entries[0];
+        assert_eq!(
+            entry
+                .extras
+                .get("inputstream.adaptive.manifest_type")
+                .map(String::as_str),
+            Some("hls")
+        );
     }
 
     #[test]
