@@ -19,7 +19,7 @@ use crate::types::M3uPlaylist;
 ///     },
 ///     entries: vec![M3uEntry {
 ///         name: Some("CNN".into()),
-///         url: Some("http://example.com/cnn".into()),
+///         urls: smallvec::smallvec!["http://example.com/cnn".into()],
 ///         tvg_id: Some("CNN.us".into()),
 ///         group_title: Some("News".into()),
 ///         duration: Some(-1.0),
@@ -50,12 +50,7 @@ pub fn write(playlist: &M3uPlaylist) -> String {
     // Channel entries.
     for entry in &playlist.entries {
         // Skip entries without a URL (matches TS behavior).
-        let Some(url) = entry
-            .urls
-            .first()
-            .map(String::as_str)
-            .or(entry.url.as_deref())
-        else {
+        let Some(url) = entry.primary_url() else {
             continue;
         };
 
@@ -192,6 +187,7 @@ fn estimate_capacity(playlist: &M3uPlaylist) -> usize {
 mod tests {
     use super::*;
     use crate::types::{M3uEntry, M3uHeader, M3uPlaylist};
+    use smallvec::smallvec;
 
     #[test]
     fn write_empty_playlist() {
@@ -219,7 +215,7 @@ mod tests {
             header: M3uHeader::default(),
             entries: vec![M3uEntry {
                 name: Some("CNN".into()),
-                url: Some("http://example.com/cnn".into()),
+                urls: smallvec!["http://example.com/cnn".into()],
                 tvg_id: Some("CNN.us".into()),
                 group_title: Some("News".into()),
                 duration: Some(-1.0),
@@ -256,7 +252,7 @@ mod tests {
             header: M3uHeader::default(),
             entries: vec![M3uEntry {
                 name: Some("Ch".into()),
-                url: Some("http://example.com/ch".into()),
+                urls: smallvec!["http://example.com/ch".into()],
                 duration: Some(-1.0),
                 extras,
                 ..Default::default()
@@ -272,7 +268,7 @@ mod tests {
             header: M3uHeader::default(),
             entries: vec![M3uEntry {
                 name: Some("Ch".into()),
-                url: Some("http://example.com/ch".into()),
+                urls: smallvec!["http://example.com/ch".into()],
                 ..Default::default()
             }],
         };

@@ -11,8 +11,9 @@ It focuses on the metadata commonly seen in real IPTV playlists, not just the mi
 ## What It Provides
 
 - `parse(&str) -> Result<M3uPlaylist, M3uError>`
+- `parse_with_mode(&str, ParseMode) -> Result<M3uPlaylist, M3uError>`
 - `write(&M3uPlaylist) -> String`
-- stable ID generation for entries
+- deterministic stable-ID base generation plus playlist-unique collision resolution
 - support for common IPTV metadata such as:
   - `tvg-id`
   - `tvg-name`
@@ -45,12 +46,19 @@ let output = write(&playlist);
 assert!(output.starts_with("#EXTM3U"));
 ```
 
+## Parse Modes
+
+- `parse()` uses `ParseMode::Permissive` to accept common headerless IPTV playlists.
+- `parse_strict()` requires `#EXTM3U` as the first non-empty line.
+- `parse_with_mode()` lets callers choose explicitly.
+
 ## Main Types
 
 - `M3uPlaylist`
 - `M3uHeader`
 - `M3uEntry`
 - `M3uError`
+- `ParseMode`
 
 ## Typical Uses
 
@@ -69,6 +77,7 @@ assert!(output.starts_with("#EXTM3U"));
 - the crate does not fetch playlists over the network
 - malformed vendor-specific extensions may still need caller-side handling
 - writing aims to preserve structured meaning, not exact byte-for-byte source fidelity
+- unknown vendor attributes are preserved in `extras`, but unknown directives are skipped
 
 ## License
 

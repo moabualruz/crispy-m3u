@@ -8,6 +8,15 @@
 use crate::error::M3uError;
 use crate::types::{M3uEntry, M3uHeader, M3uPlaylist};
 
+/// Parsing strictness for playlists with missing or malformed headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseMode {
+    /// Require `#EXTM3U` as the first non-empty line.
+    Strict,
+    /// Accept common headerless IPTV playlists and best-effort vendor content.
+    Permissive,
+}
+
 /// Known M3U attributes mapped from kebab-case to their field assignment.
 /// The TS library uses camelCase; we use snake_case field names instead.
 const KNOWN_CHANNEL_ATTRS: &[(&str, &str)] = &[
@@ -38,12 +47,12 @@ const KNOWN_CHANNEL_ATTRS: &[(&str, &str)] = &[
 /// Header-level attributes that set the EPG URL.
 const EPG_URL_ATTRS: &[&str] = &["x-tvg-url", "url-tvg"];
 
-/// Parse an M3U/M3U8 playlist string into a structured [`M3uPlaylist`].
+/// Parse an M3U/M3U8 playlist string using permissive real-world defaults.
 ///
 /// # Errors
 ///
-/// Returns [`M3uError::MissingHeader`] if the content does not start with
-/// `#EXTM3U` (after stripping a possible UTF-8 BOM and leading whitespace).
+/// Returns [`M3uError::MissingHeader`] in strict mode when the content does
+/// not start with `#EXTM3U`.
 ///
 /// # Example
 ///
@@ -53,6 +62,16 @@ const EPG_URL_ATTRS: &[&str] = &["x-tvg-url", "url-tvg"];
 /// assert_eq!(playlist.entries.len(), 1);
 /// ```
 pub fn parse(content: &str) -> Result<M3uPlaylist, M3uError> {
+    parse_with_mode(content, ParseMode::Permissive)
+}
+
+/// Parse an M3U/M3U8 playlist string using strict header validation.
+pub fn parse_strict(content: &str) -> Result<M3uPlaylist, M3uError> {
+    parse_with_mode(content, ParseMode::Strict)
+}
+
+/// Parse an M3U/M3U8 playlist string with explicit strictness.
+pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3uError> {
     // Strip UTF-8 BOM if present.
     let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
 
@@ -79,14 +98,10 @@ pub fn parse(content: &str) -> Result<M3uPlaylist, M3uError> {
         }
 
         if !header_seen {
-            // Be lenient: if the very first non-empty line is not #EXTM3U,
-            // still try to parse but report a missing header.
-            // Many real-world M3U files omit the header entirely.
-            header_seen = true; // prevent re-checking
-            // If this line is an #EXTINF, fall through; otherwise skip.
-            if !line.starts_with('#') && !is_url(line) {
+            if matches!(mode, ParseMode::Strict) {
                 return Err(M3uError::MissingHeader);
             }
+            header_seen = true;
         }
 
         // --- #EXTINF line ---
@@ -245,7 +260,9 @@ impl Iterator for M3uEntryIter<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let raw_line = self.lines.next()?;
+            let Some(raw_line) = self.lines.next() else {
+                return self.current_entry.take().filter(M3uEntry::has_url);
+            };
             let line = raw_line.trim();
 
             if line.is_empty() || line.starts_with("#EXTM3U") {
@@ -632,7 +649,10 @@ http://example.com/cnn
             Some("http://catchup.com/{utc}")
         );
         assert_eq!(ch.name.as_deref(), Some("CNN HD"));
-        assert_eq!(ch.urls.first().map(String::as_str), Some("http://example.com/cnn"));
+        assert_eq!(
+            ch.urls.first().map(String::as_str),
+            Some("http://example.com/cnn")
+        );
         assert_eq!(ch.duration, Some(-1.0));
     }
 
@@ -665,7 +685,10 @@ http://example.com/stream3
         assert_eq!(playlist.entries.len(), 1);
 
         let ch = &playlist.entries[0];
-        assert_eq!(ch.urls.first().map(String::as_str), Some("http://example.com/stream1"));
+        assert_eq!(
+            ch.urls.first().map(String::as_str),
+            Some("http://example.com/stream1")
+        );
         assert_eq!(ch.urls.len(), 3);
         assert_eq!(ch.urls[0], "http://example.com/stream1");
         assert_eq!(ch.urls[1], "http://example.com/stream2");
@@ -740,7 +763,10 @@ https://stream.example.com/cnn
 
         let ch = &playlist.entries[0];
         assert_eq!(ch.name.as_deref(), Some("Bare Channel"));
-        assert_eq!(ch.urls.first().map(String::as_str), Some("http://example.com/bare"));
+        assert_eq!(
+            ch.urls.first().map(String::as_str),
+            Some("http://example.com/bare")
+        );
         assert!(ch.tvg_id.is_none());
         assert!(ch.tvg_logo.is_none());
         assert!(ch.group_title.is_none());
@@ -842,10 +868,9 @@ https://stream.example.com/cnn
             #EXTINF:-1,Ch1\nhttp://example.com/1\n\
             #EXTINF:-1,Ch2\nhttp://example.com/2\n";
         let entries: Vec<M3uEntry> = parse_iter(content).collect();
-        // Iterator flushes on seeing next #EXTINF, so first entry is yielded.
-        // The last entry may not be yielded by the iterator (limitation).
-        assert!(!entries.is_empty());
+        assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name.as_deref(), Some("Ch1"));
+        assert_eq!(entries[1].name.as_deref(), Some("Ch2"));
     }
 
     #[test]
@@ -884,6 +909,24 @@ https://stream.example.com/cnn
         let mut entry3 = M3uEntry::default();
         parse_duration("0 group-title=\"test\"", &mut entry3);
         assert_eq!(entry3.duration, Some(0.0));
+    }
+
+    #[test]
+    fn parse_strict_requires_header() {
+        let content = "#EXTINF:-1,No Header\nhttp://example.com/no-header\n";
+        let error = parse_strict(content).unwrap_err();
+        assert!(matches!(error, M3uError::MissingHeader));
+    }
+
+    #[test]
+    fn parse_permissive_allows_headerless_playlist() {
+        let content = "#EXTINF:-1,No Header\nhttp://example.com/no-header\n";
+        let playlist = parse(content).unwrap();
+        assert_eq!(playlist.entries.len(), 1);
+        assert_eq!(
+            playlist.entries[0].primary_url(),
+            Some("http://example.com/no-header")
+        );
     }
 
     // -----------------------------------------------------------------------

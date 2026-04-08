@@ -24,7 +24,9 @@ pub mod types;
 pub mod writer;
 
 pub use error::M3uError;
-pub use id::generate_stable_id;
-pub use parser::parse;
+pub use id::{
+    generate_playlist_unique_id, generate_stable_id, generate_stable_id_base, uniquify_stable_id,
+};
+pub use parser::{ParseMode, parse, parse_strict, parse_with_mode};
 pub use types::{M3uEntry, M3uHeader, M3uPlaylist};
 pub use writer::write;

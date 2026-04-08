@@ -42,11 +42,16 @@ pub struct M3uHeader {
 /// A single M3U entry (live channel, radio stream, or VOD item).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct M3uEntry {
-    /// Primary stream URL.
-    pub url: Option<String>,
-
-    /// Alternative stream URLs (multi-URL entries).
-    #[serde(default, skip_serializing_if = "SmallVec::is_empty")]
+    /// Stream URLs for this entry.
+    ///
+    /// `urls[0]` is the canonical primary URL when present; subsequent items
+    /// are alternates for multi-URL playlists.
+    #[serde(
+        default,
+        skip_serializing_if = "SmallVec::is_empty",
+        alias = "url",
+        deserialize_with = "deserialize_urls"
+    )]
     pub urls: SmallVec<[String; 2]>,
 
     /// Display name (text after the comma on `#EXTINF` line).
@@ -148,7 +153,21 @@ pub struct M3uEntry {
 impl M3uEntry {
     /// Returns `true` if this entry has at least one stream URL.
     pub fn has_url(&self) -> bool {
-        self.url.is_some() || !self.urls.is_empty()
+        !self.urls.is_empty()
+    }
+
+    /// Returns the canonical primary URL for the entry.
+    pub fn primary_url(&self) -> Option<&str> {
+        self.urls.first().map(String::as_str)
+    }
+
+    /// Sets the canonical primary URL for the entry.
+    pub fn set_primary_url(&mut self, url: String) {
+        if self.urls.is_empty() {
+            self.urls.push(url);
+        } else {
+            self.urls[0] = url;
+        }
     }
 
     /// Returns `true` if this entry has been identified (has name, tvg_name, or tvg_id).
@@ -233,15 +252,8 @@ impl From<M3uEntry> for crispy_iptv_types::PlaylistEntry {
             extras.insert("tvg-shift".to_string(), shift.to_string());
         }
 
-        let mut urls = e.urls;
-        if urls.is_empty()
-            && let Some(ref url) = e.url
-        {
-            urls.push(url.clone());
-        }
-
         Self {
-            urls,
+            urls: e.urls,
             name: e.name,
             tvg_id: e.tvg_id,
             tvg_name: e.tvg_name,
@@ -260,9 +272,39 @@ impl From<M3uEntry> for crispy_iptv_types::PlaylistEntry {
     }
 }
 
+fn deserialize_urls<'de, D>(deserializer: D) -> Result<SmallVec<[String; 2]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum UrlField {
+        Single(String),
+        Multiple(Vec<String>),
+    }
+
+    let value = Option::<UrlField>::deserialize(deserializer)?;
+    let mut urls = SmallVec::new();
+
+    match value {
+        None => {}
+        Some(UrlField::Single(url)) => {
+            if !url.is_empty() {
+                urls.push(url);
+            }
+        }
+        Some(UrlField::Multiple(values)) => {
+            urls.extend(values.into_iter().filter(|value| !value.is_empty()));
+        }
+    }
+
+    Ok(urls)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smallvec::smallvec;
 
     #[test]
     fn default_entry_has_no_url() {
@@ -283,7 +325,7 @@ mod tests {
     #[test]
     fn conversion_to_playlist_entry_preserves_fields() {
         let entry = M3uEntry {
-            url: Some("http://example.com/stream".into()),
+            urls: smallvec!["http://example.com/stream".into()],
             name: Some("Test Channel".into()),
             tvg_id: Some("ch1".into()),
             group_title: Some("News".into()),
@@ -311,7 +353,7 @@ mod tests {
     #[test]
     fn conversion_preserves_is_radio_flag() {
         let entry = M3uEntry {
-            url: Some("http://example.com/radio".into()),
+            urls: smallvec!["http://example.com/radio".into()],
             name: Some("Jazz FM".into()),
             is_radio: true,
             ..Default::default()
@@ -325,7 +367,7 @@ mod tests {
     #[test]
     fn conversion_maps_provider_and_media_to_extras() {
         let entry = M3uEntry {
-            url: Some("http://example.com/movie".into()),
+            urls: smallvec!["http://example.com/movie".into()],
             name: Some("Movie".into()),
             is_media: true,
             media_dir: Some("/movies".into()),
@@ -358,7 +400,7 @@ mod tests {
         web_properties.insert("web-regex".to_string(), "<pattern>".to_string());
 
         let entry = M3uEntry {
-            url: Some("http://example.com/web".into()),
+            urls: smallvec!["http://example.com/web".into()],
             name: Some("Web Ch".into()),
             web_properties,
             ..Default::default()
@@ -369,5 +411,30 @@ mod tests {
             pe.extras.get("webprop:web-regex").map(String::as_str),
             Some("<pattern>")
         );
+    }
+
+    #[test]
+    fn primary_url_helpers_manage_canonical_url() {
+        let mut entry = M3uEntry::default();
+        assert_eq!(entry.primary_url(), None);
+
+        entry.set_primary_url("http://example.com/primary".to_string());
+        assert_eq!(entry.primary_url(), Some("http://example.com/primary"));
+        assert_eq!(entry.urls.len(), 1);
+
+        entry.urls.push("http://example.com/backup".into());
+        entry.set_primary_url("http://example.com/new-primary".to_string());
+
+        assert_eq!(entry.primary_url(), Some("http://example.com/new-primary"));
+        assert_eq!(entry.urls[1], "http://example.com/backup");
+    }
+
+    #[test]
+    fn deserialize_legacy_single_url_field() {
+        let entry: M3uEntry =
+            serde_json::from_str(r#"{"url":"http://example.com/legacy","name":"Legacy"}"#).unwrap();
+
+        assert_eq!(entry.primary_url(), Some("http://example.com/legacy"));
+        assert_eq!(entry.name.as_deref(), Some("Legacy"));
     }
 }
