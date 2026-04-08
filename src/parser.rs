@@ -111,7 +111,8 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
 
         // --- #EXTINF line ---
         if let Some(rest) = line.strip_prefix("#EXTINF:") {
-            let (to_push, carried_props) = transition_pending_entry_for_extinf(&mut current_entry);
+            let (to_push, carried_props) =
+                transition_pending_entry_for_extinf(&mut current_entry, current_entry_has_extinf);
             if let Some(entry) = to_push {
                 entries.push(entry);
             }
@@ -308,8 +309,10 @@ impl Iterator for M3uEntryIter<'_> {
             }
 
             if let Some(rest) = line.strip_prefix("#EXTINF:") {
-                let (to_yield, carried_props) =
-                    transition_pending_entry_for_extinf(&mut self.current_entry);
+                let (to_yield, carried_props) = transition_pending_entry_for_extinf(
+                    &mut self.current_entry,
+                    self.current_entry_has_extinf,
+                );
                 let to_yield = to_yield.and_then(|entry| self.finalize_entry(entry, true));
 
                 let mut entry = M3uEntry::default();
@@ -420,13 +423,16 @@ type CarriedDirectiveState = (HashMap<String, String>, HashMap<String, String>);
 
 fn transition_pending_entry_for_extinf(
     current_entry: &mut Option<M3uEntry>,
+    has_extinf_context: bool,
 ) -> (Option<M3uEntry>, Option<CarriedDirectiveState>) {
     match current_entry.take() {
+        Some(entry) if should_retain_parser_entry(&entry, has_extinf_context) => {
+            (Some(entry), None)
+        }
         Some(entry) if entry.has_url() => (Some(entry), None),
         Some(entry) if !entry.stream_properties.is_empty() || !entry.vlc_options.is_empty() => {
             (None, Some((entry.stream_properties, entry.vlc_options)))
         }
-        Some(entry) if entry.has_inline_metadata() => (Some(entry), None),
         _ => (None, None),
     }
 }
@@ -1146,6 +1152,53 @@ https://stream.example.com/cnn
     }
 
     #[test]
+    fn parse_keeps_webprop_entry_with_carried_directives_before_next_extinf() {
+        let content = "\
+#EXTM3U
+#KODIPROP:inputstream=inputstream.adaptive
+#EXTVLCOPT:http-user-agent=VLC/3.0
+#EXTINF:-1,
+#WEBPROP:web-player=html5
+#EXTINF:-1,Next
+http://example.com/next
+";
+        let playlist = parse(content).unwrap();
+
+        assert_eq!(playlist.entries.len(), 2);
+
+        let retained = &playlist.entries[0];
+        assert!(retained.urls.is_empty());
+        assert_eq!(
+            retained
+                .stream_properties
+                .get("inputstream")
+                .map(String::as_str),
+            Some("inputstream.adaptive")
+        );
+        assert_eq!(
+            retained
+                .vlc_options
+                .get("http-user-agent")
+                .map(String::as_str),
+            Some("VLC/3.0")
+        );
+        assert_eq!(
+            retained
+                .web_properties
+                .get("web-player")
+                .map(String::as_str),
+            Some("html5")
+        );
+
+        let next = &playlist.entries[1];
+        assert_eq!(next.name.as_deref(), Some("Next"));
+        assert_eq!(next.primary_url(), Some("http://example.com/next"));
+        assert!(next.stream_properties.is_empty());
+        assert!(next.vlc_options.is_empty());
+        assert!(next.web_properties.is_empty());
+    }
+
+    #[test]
     fn parse_ignores_orphan_webprop_without_extinf_context() {
         let content = "#EXTM3U\n#WEBPROP:web-player=html5\n";
         let playlist = parse(content).unwrap();
@@ -1321,6 +1374,27 @@ http://example.com/2
                 .get("web-player")
                 .map(String::as_str),
             Some("html5")
+        );
+    }
+
+    #[test]
+    fn parse_iter_matches_parse_for_webprop_entry_with_carried_directives_before_next_extinf() {
+        let content = "\
+#EXTM3U
+#KODIPROP:inputstream=inputstream.adaptive
+#EXTVLCOPT:http-user-agent=VLC/3.0
+#EXTINF:-1,
+#WEBPROP:web-player=html5
+#EXTINF:-1,Next
+http://example.com/next
+";
+        let parsed = parse(content).unwrap();
+        let iter_entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(iter_entries.len(), parsed.entries.len());
+        assert_eq!(
+            serde_json::to_value(&iter_entries).unwrap(),
+            serde_json::to_value(&parsed.entries).unwrap()
         );
     }
 
