@@ -186,10 +186,6 @@ pub fn parse(content: &str) -> Result<M3uPlaylist, M3uError> {
         if is_url(line) {
             let entry = current_entry.get_or_insert_with(M3uEntry::default);
 
-            // Only assign to `url` if this is the first URL for the entry.
-            if entry.url.is_none() {
-                entry.url = Some(line.to_string());
-            }
             entry.urls.push(line.to_string());
 
             // Apply EXTGRP groups if this entry doesn't have groups from
@@ -279,9 +275,6 @@ impl Iterator for M3uEntryIter<'_> {
 
             if is_url(line) {
                 let entry = self.current_entry.get_or_insert_with(M3uEntry::default);
-                if entry.url.is_none() {
-                    entry.url = Some(line.to_string());
-                }
                 entry.urls.push(line.to_string());
                 continue;
             }
@@ -639,7 +632,7 @@ http://example.com/cnn
             Some("http://catchup.com/{utc}")
         );
         assert_eq!(ch.name.as_deref(), Some("CNN HD"));
-        assert_eq!(ch.url.as_deref(), Some("http://example.com/cnn"));
+        assert_eq!(ch.urls.first().map(String::as_str), Some("http://example.com/cnn"));
         assert_eq!(ch.duration, Some(-1.0));
     }
 
@@ -672,7 +665,7 @@ http://example.com/stream3
         assert_eq!(playlist.entries.len(), 1);
 
         let ch = &playlist.entries[0];
-        assert_eq!(ch.url.as_deref(), Some("http://example.com/stream1"));
+        assert_eq!(ch.urls.first().map(String::as_str), Some("http://example.com/stream1"));
         assert_eq!(ch.urls.len(), 3);
         assert_eq!(ch.urls[0], "http://example.com/stream1");
         assert_eq!(ch.urls[1], "http://example.com/stream2");
@@ -734,7 +727,7 @@ https://stream.example.com/cnn
 
         assert_eq!(playlist.entries[1].tvg_id.as_deref(), Some("ITV1.uk"));
         assert_eq!(
-            playlist.entries[2].url.as_deref(),
+            playlist.entries[2].urls.first().map(String::as_str),
             Some("https://stream.example.com/cnn")
         );
     }
@@ -747,7 +740,7 @@ https://stream.example.com/cnn
 
         let ch = &playlist.entries[0];
         assert_eq!(ch.name.as_deref(), Some("Bare Channel"));
-        assert_eq!(ch.url.as_deref(), Some("http://example.com/bare"));
+        assert_eq!(ch.urls.first().map(String::as_str), Some("http://example.com/bare"));
         assert!(ch.tvg_id.is_none());
         assert!(ch.tvg_logo.is_none());
         assert!(ch.group_title.is_none());
@@ -775,7 +768,7 @@ https://stream.example.com/cnn
         let content = "#EXTM3U\n#EXTINF:-1,RTMP Stream\nrtmp://cdn.example.com/live/key\n";
         let playlist = parse(content).unwrap();
         assert_eq!(
-            playlist.entries[0].url.as_deref(),
+            playlist.entries[0].urls.first().map(String::as_str),
             Some("rtmp://cdn.example.com/live/key")
         );
     }
@@ -785,7 +778,7 @@ https://stream.example.com/cnn
         let content = "#EXTM3U\n#EXTINF:-1,UDP Stream\nudp://239.0.0.1:5000\n";
         let playlist = parse(content).unwrap();
         assert_eq!(
-            playlist.entries[0].url.as_deref(),
+            playlist.entries[0].urls.first().map(String::as_str),
             Some("udp://239.0.0.1:5000")
         );
     }
@@ -840,7 +833,7 @@ https://stream.example.com/cnn
         let playlist = parse(content).unwrap();
         assert_eq!(playlist.entries.len(), 1);
         assert_eq!(playlist.entries[0].name.as_deref(), Some("No URL Channel"));
-        assert!(playlist.entries[0].url.is_none());
+        assert!(playlist.entries[0].urls.is_empty());
     }
 
     #[test]

@@ -50,7 +50,12 @@ pub fn write(playlist: &M3uPlaylist) -> String {
     // Channel entries.
     for entry in &playlist.entries {
         // Skip entries without a URL (matches TS behavior).
-        let Some(url) = entry.url.as_deref() else {
+        let Some(url) = entry
+            .urls
+            .first()
+            .map(String::as_str)
+            .or(entry.url.as_deref())
+        else {
             continue;
         };
 
@@ -293,7 +298,7 @@ http://stream.example.com/movie1"#;
         for (a, b) in parsed.entries.iter().zip(reparsed.entries.iter()) {
             assert_eq!(a.tvg_id, b.tvg_id);
             assert_eq!(a.name, b.name);
-            assert_eq!(a.url, b.url);
+            assert_eq!(a.urls, b.urls);
             assert_eq!(a.group_title, b.group_title);
             assert_eq!(a.duration, b.duration);
             assert_eq!(a.tvg_logo, b.tvg_logo);

@@ -233,9 +233,15 @@ impl From<M3uEntry> for crispy_iptv_types::PlaylistEntry {
             extras.insert("tvg-shift".to_string(), shift.to_string());
         }
 
+        let mut urls = e.urls;
+        if urls.is_empty()
+            && let Some(ref url) = e.url
+        {
+            urls.push(url.clone());
+        }
+
         Self {
-            url: e.url,
-            urls: e.urls,
+            urls,
             name: e.name,
             tvg_id: e.tvg_id,
             tvg_name: e.tvg_name,
@@ -288,7 +294,7 @@ mod tests {
         };
 
         let pe: crispy_iptv_types::PlaylistEntry = entry.into();
-        assert_eq!(pe.url.as_deref(), Some("http://example.com/stream"));
+        assert_eq!(pe.primary_url(), Some("http://example.com/stream"));
         assert_eq!(pe.name.as_deref(), Some("Test Channel"));
         assert_eq!(pe.tvg_id.as_deref(), Some("ch1"));
         assert_eq!(pe.group_title.as_deref(), Some("News"));
