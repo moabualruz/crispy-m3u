@@ -1,0 +1,22 @@
+[package]
+name = "crispy-m3u"
+description = "High-performance M3U/M3U8 playlist parser"
+version = "0.1.1"
+edition = "2024"
+license = "CC-BY-NC-SA-4.0"
+repository = "https://github.com/moabualruz/crispy-m3u"
+homepage = "https://github.com/moabualruz/crispy-m3u"
+documentation = "https://docs.rs/crispy-m3u"
+readme = "README.md"
+keywords = ["iptv", "m3u", "m3u8", "playlist", "parser"]
+categories = ["multimedia", "parser-implementations"]
+rust-version = "1.85"
+
+[dependencies]
+crispy-iptv-types = "0.1.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+smallvec = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+serde_json = "1"
