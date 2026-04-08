@@ -56,7 +56,7 @@ assert!(output.starts_with("#EXTM3U"));
 - `parse()` uses `ParseMode::Permissive` to accept common headerless IPTV playlists.
 - `parse_strict()` requires `#EXTM3U` as the first non-empty line.
 - `parse_with_mode()` lets callers choose explicitly.
-- `parse_iter()` preserves the same supported entry shapes as `parse()`, including retained URL-less `#EXTINF` entries, carried pre-`#EXTINF` `#KODIPROP`/`#EXTVLCOPT` state, `#WEBPROP` attached after `#EXTINF`, `#EXTGRP`-applied groups, and header catchup defaults.
+- `parse_iter()` preserves the same supported entry shapes as `parse()`, including retained URL-less `#EXTINF` entries, carried pre-`#EXTINF` `#KODIPROP`/`#EXTVLCOPT` state, `#WEBPROP` attached after `#EXTINF`, `#EXTGRP`-applied groups, and header catchup defaults on both `#EXTINF`-backed and bare URL-only entries.
 - bare URL lines are accepted as URL-only entries
 
 ## Main Types
@@ -81,7 +81,7 @@ assert!(output.starts_with("#EXTM3U"));
 - `groups` are normalized to a semicolon-delimited `group-title` on output
 - URL-less entries are written back when they carry retainable `#EXTINF` metadata, including known attributes and unknown extras
 - orphan directive-only lines without an `#EXTINF` context are still ignored
-- `parse_iter()` follows the same supported-retention rule, so collected iterator entries match `parse()` for retainable entry shapes
+- `parse_iter()` follows the same supported-retention rule, so collected iterator entries match `parse()` for retainable entry shapes, including bare URL-only entries that inherit header catchup defaults
 - serialized `HashMap` metadata is sorted by key for deterministic output
 - unknown header and entry extras keep their original key casing across parse/write roundtrips
 

@@ -234,8 +234,8 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
 /// the iterator variant, but supported entry retention matches [`parse()`],
 /// including pre-`#EXTINF` `#KODIPROP`/`#EXTVLCOPT` state, `#WEBPROP` lines
 /// attached after `#EXTINF`, `#EXTGRP`-applied groups, and header catchup
-/// defaults. Orphan directive-only state without an `#EXTINF` context is
-/// still ignored.
+/// defaults, including raw URL-only entries. Orphan directive-only state
+/// without an `#EXTINF` context is still ignored.
 pub fn parse_iter(content: &str) -> M3uEntryIter<'_> {
     // Strip UTF-8 BOM if present.
     let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
@@ -258,13 +258,18 @@ pub struct M3uEntryIter<'a> {
 }
 
 impl M3uEntryIter<'_> {
-    fn take_retainable_entry(&mut self) -> Option<M3uEntry> {
-        let mut entry = self.current_entry.take()?;
+    fn finalize_entry(&self, mut entry: M3uEntry) -> Option<M3uEntry> {
         if !entry.should_retain() {
             return None;
         }
         apply_header_catchup_to_entry(&self.header, &mut entry);
         Some(entry)
+    }
+
+    fn take_retainable_entry(&mut self) -> Option<M3uEntry> {
+        self.current_entry
+            .take()
+            .and_then(|entry| self.finalize_entry(entry))
     }
 }
 
@@ -288,11 +293,9 @@ impl Iterator for M3uEntryIter<'_> {
             }
 
             if let Some(rest) = line.strip_prefix("#EXTINF:") {
-                let (mut to_yield, carried_props) =
+                let (to_yield, carried_props) =
                     transition_pending_entry_for_extinf(&mut self.current_entry);
-                if let Some(entry) = to_yield.as_mut() {
-                    apply_header_catchup_to_entry(&self.header, entry);
-                }
+                let to_yield = to_yield.and_then(|entry| self.finalize_entry(entry));
 
                 let mut entry = M3uEntry::default();
                 parse_extinf(rest, &mut entry);
@@ -359,7 +362,7 @@ impl Iterator for M3uEntryIter<'_> {
             if is_url(line) && self.current_entry.is_none() && !self.current_entry_has_extinf {
                 let mut entry = M3uEntry::default();
                 entry.urls.push(line.to_string());
-                return Some(entry);
+                return self.finalize_entry(entry);
             }
 
             if is_url(line)
@@ -1108,6 +1111,22 @@ https://stream.example.com/cnn
         let entries: Vec<M3uEntry> = parse_iter(content).collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].primary_url(), Some("http://example.com/raw"));
+    }
+
+    #[test]
+    fn parse_iter_matches_parse_for_bare_url_with_header_catchup_defaults() {
+        let content = r#"#EXTM3U catchup="shift" catchup-days="7" catchup-source="http://catch.up/{utc}"
+http://example.com/raw
+"#;
+        let parsed = parse(content).unwrap();
+        let iter_entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(iter_entries.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&iter_entries[0]).unwrap(),
+            serde_json::to_value(&parsed.entries[0]).unwrap()
+        );
     }
 
     #[test]
