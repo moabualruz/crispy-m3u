@@ -2,29 +2,33 @@
 
 High-performance M3U and M3U8 playlist parser/writer for IPTV workflows.
 
-## Status
+## What This Crate Is
 
-Extracted from CrispyTivi. Intended as a reusable Rust parser crate for IPTV playlist ingestion and emission.
+`crispy-m3u` parses `#EXTM3U` playlists into structured Rust types and writes them back out. It is intended for IPTV applications, playlist import pipelines, migration tools, and cleanup utilities.
 
-## What This Crate Provides
+It focuses on the metadata commonly seen in real IPTV playlists, not just the minimal M3U format.
 
-- parse `#EXTM3U` playlists into structured Rust data
-- preserve common IPTV metadata such as:
+## What It Provides
+
+- `parse(&str) -> Result<M3uPlaylist, M3uError>`
+- `write(&M3uPlaylist) -> String`
+- stable ID generation for entries
+- support for common IPTV metadata such as:
   - `tvg-id`
   - `tvg-name`
   - `tvg-logo`
   - `group-title`
-  - catchup metadata
-  - custom extras
-- write structured playlists back to M3U format
-- generate stable identifiers for entries
+  - catchup fields
+  - provider-specific extra attributes
 
 ## Installation
 
 ```toml
 [dependencies]
-crispy-m3u = "0.1"
+crispy-m3u = "0.1.1"
 ```
+
+MSRV: Rust `1.85`
 
 ## Quick Start
 
@@ -33,32 +37,39 @@ use crispy_m3u::{parse, write};
 
 let input = "#EXTM3U\n#EXTINF:-1 tvg-id=\"cnn\" group-title=\"News\",CNN\nhttp://example.com/live/cnn.m3u8\n";
 let playlist = parse(input).unwrap();
+
 assert_eq!(playlist.entries.len(), 1);
+assert_eq!(playlist.entries[0].name.as_deref(), Some("CNN"));
 
 let output = write(&playlist);
 assert!(output.starts_with("#EXTM3U"));
 ```
 
-## Primary Use Cases
+## Main Types
 
-- IPTV app ingestion
-- playlist cleaning pipelines
-- playlist transformation tools
-- migration between IPTV systems
+- `M3uPlaylist`
+- `M3uHeader`
+- `M3uEntry`
+- `M3uError`
 
-## Relationship To Other Crates
+## Typical Uses
 
-- uses `crispy-iptv-types` for shared domain vocabulary
-- pairs well with `crispy-iptv-tools` for normalization and deduplication
+- importing IPTV playlists into applications
+- normalizing or cleaning playlists before further processing
+- converting raw M3U into shared data models
+- round-tripping playlists after edits
 
-## Non-Goals
+## Related Crates
 
-- network fetching
-- Xtream or Stalker API access
-- playback probing
-- app-specific persistence
+- `crispy-iptv-types` for shared cross-protocol domain types
+- `crispy-iptv-tools` for deduplication, normalization, and filtering after parsing
 
-## Caveats
+## Current Limitations
 
-- IPTV playlists in the wild are often malformed; parser behavior should be documented with known compatibility notes before public release
-- exact write fidelity for vendor-specific extras should be validated in examples/tests
+- the crate does not fetch playlists over the network
+- malformed vendor-specific extensions may still need caller-side handling
+- writing aims to preserve structured meaning, not exact byte-for-byte source fidelity
+
+## License
+
+See `LICENSE.md` and `NOTICE.md`.
