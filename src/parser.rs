@@ -5,6 +5,8 @@
 //! are identical: header attributes, `#EXTINF` attribute extraction,
 //! duration parsing, URL detection, and extras collection.
 
+use std::collections::HashMap;
+
 use crate::error::M3uError;
 use crate::types::{M3uEntry, M3uHeader, M3uPlaylist};
 
@@ -107,26 +109,10 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
 
         // --- #EXTINF line ---
         if let Some(rest) = line.strip_prefix("#EXTINF:") {
-            // If there's a pending entry with a URL, flush it.
-            // If it has no URL but has accumulated properties (KODIPROP/EXTVLCOPT),
-            // carry those forward to the new entry.
-            let carried_props = match current_entry.take() {
-                Some(entry) if entry.has_url() => {
-                    entries.push(entry);
-                    None
-                }
-                Some(entry)
-                    if !entry.stream_properties.is_empty() || !entry.vlc_options.is_empty() =>
-                {
-                    // Carry forward properties accumulated before #EXTINF.
-                    Some((entry.stream_properties, entry.vlc_options))
-                }
-                Some(entry) if entry.has_inline_metadata() => {
-                    entries.push(entry);
-                    None
-                }
-                _ => None,
-            };
+            let (to_push, carried_props) = transition_pending_entry_for_extinf(&mut current_entry);
+            if let Some(entry) = to_push {
+                entries.push(entry);
+            }
             let mut entry = M3uEntry::default();
             parse_extinf(rest, &mut entry);
 
@@ -217,13 +203,7 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
 
             // Apply EXTGRP groups if this entry doesn't have groups from
             // group-title yet.
-            if entry.groups.is_empty() && !extgrp_groups.is_empty() {
-                entry.groups.clone_from(&extgrp_groups);
-                // Set primary group_title from EXTGRP if not already set.
-                if entry.group_title.is_none() {
-                    entry.group_title = extgrp_groups.first().cloned();
-                }
-            }
+            apply_extgrp_groups(entry, &extgrp_groups);
 
             // The TS parser keeps the same entry object and only pushes it
             // to the array once (via indexOf check). We keep accumulating
@@ -250,8 +230,12 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
 /// Parse an M3U playlist and return an iterator over entries, yielding them
 /// one at a time without collecting into a `Vec`. Useful for very large playlists.
 ///
-/// The iterator itself does not error; the initial validation is skipped
-/// for the iterator variant.
+/// The iterator itself does not error; the initial validation is skipped for
+/// the iterator variant, but supported entry retention matches [`parse()`],
+/// including pre-`#EXTINF` `#KODIPROP`/`#EXTVLCOPT` state, `#WEBPROP` lines
+/// attached after `#EXTINF`, `#EXTGRP`-applied groups, and header catchup
+/// defaults. Orphan directive-only state without an `#EXTINF` context is
+/// still ignored.
 pub fn parse_iter(content: &str) -> M3uEntryIter<'_> {
     // Strip UTF-8 BOM if present.
     let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
@@ -259,6 +243,8 @@ pub fn parse_iter(content: &str) -> M3uEntryIter<'_> {
         lines: content.lines(),
         current_entry: None,
         current_entry_has_extinf: false,
+        header: M3uHeader::default(),
+        extgrp_groups: Vec::new(),
     }
 }
 
@@ -267,6 +253,19 @@ pub struct M3uEntryIter<'a> {
     lines: std::str::Lines<'a>,
     current_entry: Option<M3uEntry>,
     current_entry_has_extinf: bool,
+    header: M3uHeader,
+    extgrp_groups: Vec<String>,
+}
+
+impl M3uEntryIter<'_> {
+    fn take_retainable_entry(&mut self) -> Option<M3uEntry> {
+        let mut entry = self.current_entry.take()?;
+        if !entry.should_retain() {
+            return None;
+        }
+        apply_header_catchup_to_entry(&self.header, &mut entry);
+        Some(entry)
+    }
 }
 
 impl Iterator for M3uEntryIter<'_> {
@@ -275,28 +274,80 @@ impl Iterator for M3uEntryIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let Some(raw_line) = self.lines.next() else {
-                return self.current_entry.take().filter(M3uEntry::should_retain);
+                return self.take_retainable_entry();
             };
             let line = raw_line.trim();
 
-            if line.is_empty() || line.starts_with("#EXTM3U") {
+            if line.is_empty() {
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("#EXTM3U") {
+                parse_header_attrs(rest, &mut self.header);
                 continue;
             }
 
             if let Some(rest) = line.strip_prefix("#EXTINF:") {
-                // If we have a pending supported entry, yield it first.
-                let to_yield = self
-                    .current_entry
-                    .take()
-                    .filter(super::types::M3uEntry::should_retain);
+                let (mut to_yield, carried_props) =
+                    transition_pending_entry_for_extinf(&mut self.current_entry);
+                if let Some(entry) = to_yield.as_mut() {
+                    apply_header_catchup_to_entry(&self.header, entry);
+                }
 
                 let mut entry = M3uEntry::default();
                 parse_extinf(rest, &mut entry);
+
+                if let Some((stream_properties, vlc_options)) = carried_props {
+                    entry.stream_properties = stream_properties;
+                    entry.vlc_options = vlc_options;
+                }
+
                 self.current_entry = Some(entry);
                 self.current_entry_has_extinf = true;
 
-                if to_yield.is_some() {
-                    return to_yield;
+                if let Some(entry) = to_yield {
+                    return Some(entry);
+                }
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("#KODIPROP:") {
+                if let Some((key, value)) = parse_property_value(rest) {
+                    let entry = self.current_entry.get_or_insert_with(M3uEntry::default);
+                    entry.stream_properties.insert(key, value);
+                }
+                continue;
+            }
+
+            if let Some(rest) = line
+                .strip_prefix("#EXTVLCOPT:")
+                .or_else(|| line.strip_prefix("#EXTVLCOPT--"))
+            {
+                if let Some((key, value)) = parse_property_value(rest) {
+                    let entry = self.current_entry.get_or_insert_with(M3uEntry::default);
+                    entry.vlc_options.insert(key, value);
+                }
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("#WEBPROP:") {
+                if let Some((key, value)) = parse_property_value(rest) {
+                    let entry = self.current_entry.get_or_insert_with(M3uEntry::default);
+                    entry.web_properties.insert(key, value);
+                }
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("#EXTGRP:") {
+                let trimmed = rest.trim();
+                if !trimmed.is_empty() {
+                    self.extgrp_groups.clear();
+                    for group in trimmed.split(';') {
+                        let group = group.trim();
+                        if !group.is_empty() {
+                            self.extgrp_groups.push(group.to_string());
+                        }
+                    }
                 }
                 continue;
             }
@@ -319,6 +370,7 @@ impl Iterator for M3uEntryIter<'_> {
             {
                 let entry = self.current_entry.get_or_insert_with(M3uEntry::default);
                 entry.urls.push(line.to_string());
+                apply_extgrp_groups(entry, &self.extgrp_groups);
                 continue;
             }
         }
@@ -342,6 +394,29 @@ fn flush_entry(current: &mut Option<M3uEntry>, entries: &mut Vec<M3uEntry>) {
 const HEADER_CATCHUP_ATTRS: &[&str] = &["catchup", "catchup-type"];
 const HEADER_CATCHUP_DAYS: &str = "catchup-days";
 const HEADER_CATCHUP_SOURCE: &str = "catchup-source";
+type CarriedDirectiveState = (HashMap<String, String>, HashMap<String, String>);
+
+fn transition_pending_entry_for_extinf(
+    current_entry: &mut Option<M3uEntry>,
+) -> (Option<M3uEntry>, Option<CarriedDirectiveState>) {
+    match current_entry.take() {
+        Some(entry) if entry.has_url() => (Some(entry), None),
+        Some(entry) if !entry.stream_properties.is_empty() || !entry.vlc_options.is_empty() => {
+            (None, Some((entry.stream_properties, entry.vlc_options)))
+        }
+        Some(entry) if entry.has_inline_metadata() => (Some(entry), None),
+        _ => (None, None),
+    }
+}
+
+fn apply_extgrp_groups(entry: &mut M3uEntry, extgrp_groups: &[String]) {
+    if entry.groups.is_empty() && !extgrp_groups.is_empty() {
+        entry.groups = extgrp_groups.to_vec();
+        if entry.group_title.is_none() {
+            entry.group_title = extgrp_groups.first().cloned();
+        }
+    }
+}
 
 /// Parse header-level attributes from the `#EXTM3U` line (everything after `#EXTM3U`).
 ///
@@ -611,21 +686,25 @@ fn apply_catchup_inheritance(header: &M3uHeader, entries: &mut [M3uEntry]) {
     }
 
     for entry in entries.iter_mut() {
-        if entry.catchup.is_none()
-            && let Some(ref c) = header.catchup
-        {
-            entry.catchup = Some(c.clone());
-        }
-        if entry.catchup_days.is_none()
-            && let Some(ref d) = header.catchup_days
-        {
-            entry.catchup_days = Some(d.clone());
-        }
-        if entry.catchup_source.is_none()
-            && let Some(ref s) = header.catchup_source
-        {
-            entry.catchup_source = Some(s.clone());
-        }
+        apply_header_catchup_to_entry(header, entry);
+    }
+}
+
+fn apply_header_catchup_to_entry(header: &M3uHeader, entry: &mut M3uEntry) {
+    if entry.catchup.is_none()
+        && let Some(ref catchup) = header.catchup
+    {
+        entry.catchup = Some(catchup.clone());
+    }
+    if entry.catchup_days.is_none()
+        && let Some(ref catchup_days) = header.catchup_days
+    {
+        entry.catchup_days = Some(catchup_days.clone());
+    }
+    if entry.catchup_source.is_none()
+        && let Some(ref catchup_source) = header.catchup_source
+    {
+        entry.catchup_source = Some(catchup_source.clone());
     }
 }
 
@@ -1063,6 +1142,67 @@ https://stream.example.com/cnn
         assert!(entries[0].urls.is_empty());
         assert_eq!(entries[0].group_title.as_deref(), Some("News"));
         assert_eq!(entries[0].groups, vec!["News"]);
+    }
+
+    #[test]
+    fn parse_iter_matches_parse_for_metadata_only_entry_with_pre_extinf_directives() {
+        let content = "\
+#EXTM3U
+#KODIPROP:inputstream=inputstream.adaptive
+#EXTVLCOPT:network-caching=1000
+#EXTINF:-1 tvg-id=\"ch1\",No URL Channel
+";
+        let parsed = parse(content).unwrap();
+        let iter_entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(iter_entries.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&iter_entries[0]).unwrap(),
+            serde_json::to_value(&parsed.entries[0]).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_iter_matches_parse_for_supported_directive_backed_entry() {
+        let content = "\
+#EXTM3U catchup=\"shift\" catchup-days=\"7\" catchup-source=\"http://catch.up/{utc}\"
+#EXTGRP:Sports
+#KODIPROP:inputstream=inputstream.adaptive
+#EXTVLCOPT:http-user-agent=VLC/3.0
+#EXTINF:-1 tvg-id=\"ch1\",Channel
+#WEBPROP:web-player=html5
+http://example.com/ch
+";
+        let parsed = parse(content).unwrap();
+        let iter_entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(iter_entries.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&iter_entries[0]).unwrap(),
+            serde_json::to_value(&parsed.entries[0]).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_iter_does_not_carry_webprop_before_extinf() {
+        let content = "\
+#EXTM3U
+#WEBPROP:web-player=html5
+#EXTINF:-1,Ch
+http://example.com/ch
+";
+        let parsed = parse(content).unwrap();
+        let iter_entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(iter_entries.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&iter_entries[0]).unwrap(),
+            serde_json::to_value(&parsed.entries[0]).unwrap()
+        );
+        assert!(iter_entries[0].web_properties.is_empty());
     }
 
     #[test]
