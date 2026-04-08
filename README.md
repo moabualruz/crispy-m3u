@@ -12,6 +12,7 @@ It focuses on the metadata commonly seen in real IPTV playlists, not just the mi
 
 - `parse(&str) -> Result<M3uPlaylist, M3uError>`
 - `parse_with_mode(&str, ParseMode) -> Result<M3uPlaylist, M3uError>`
+- `parser::parse_iter(&str) -> impl Iterator<Item = M3uEntry>`
 - `write(&M3uPlaylist) -> String`
 - deterministic stable-ID base generation plus playlist-unique collision resolution
 - support for common IPTV metadata such as:
@@ -77,7 +78,8 @@ assert!(output.starts_with("#EXTM3U"));
 - all URLs in `entry.urls` are serialized, not just the first one
 - `stream_properties`, `vlc_options`, and `web_properties` are written back as directive lines
 - `groups` are normalized to a semicolon-delimited `group-title` on output
-- identified metadata-only entries are written back even when no URL is present
+- URL-less entries are written back when they carry retainable `#EXTINF` metadata, including known attributes and unknown extras
+- orphan directive-only lines without an `#EXTINF` context are still ignored
 - serialized `HashMap` metadata is sorted by key for deterministic output
 - unknown header and entry extras keep their original key casing across parse/write roundtrips
 

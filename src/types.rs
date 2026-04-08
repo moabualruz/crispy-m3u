@@ -180,6 +180,43 @@ impl M3uEntry {
     pub fn is_identified(&self) -> bool {
         self.name.is_some() || self.tvg_name.is_some() || self.tvg_id.is_some()
     }
+
+    /// Returns `true` when the entry has retainable `#EXTINF` metadata.
+    ///
+    /// This intentionally excludes directive-only state such as orphaned
+    /// `#KODIPROP`, `#EXTVLCOPT`, or `#WEBPROP` lines without an `#EXTINF`
+    /// context, which the parser still treats as unsupported standalone
+    /// entries.
+    pub fn has_inline_metadata(&self) -> bool {
+        self.is_identified()
+            || self.tvg_language.is_some()
+            || self.tvg_logo.is_some()
+            || self.tvg_url.is_some()
+            || self.tvg_rec.is_some()
+            || self.tvg_chno.is_some()
+            || self.group_title.is_some()
+            || !self.groups.is_empty()
+            || self.timeshift.is_some()
+            || self.catchup.is_some()
+            || self.catchup_days.is_some()
+            || self.catchup_source.is_some()
+            || self.is_radio
+            || self.tvg_shift.is_some()
+            || self.is_media
+            || self.media_dir.is_some()
+            || self.media_size.is_some()
+            || self.provider_name.is_some()
+            || self.provider_type.is_some()
+            || self.provider_logo.is_some()
+            || self.provider_countries.is_some()
+            || self.provider_languages.is_some()
+            || !self.extras.is_empty()
+    }
+
+    /// Returns `true` when the entry should be preserved by parse/write flows.
+    pub fn should_retain(&self) -> bool {
+        self.has_url() || self.has_inline_metadata()
+    }
 }
 
 /// Convert an `M3uEntry` into a `PlaylistEntry` from the shared types crate.
@@ -326,6 +363,39 @@ mod tests {
             ..Default::default()
         };
         assert!(entry.is_identified());
+        assert!(entry.has_inline_metadata());
+        assert!(entry.should_retain());
+    }
+
+    #[test]
+    fn extras_only_entry_is_retainable() {
+        let entry = M3uEntry {
+            extras: {
+                let mut extras = HashMap::new();
+                extras.insert("Vendor-Key".into(), "value".into());
+                extras
+            },
+            ..Default::default()
+        };
+
+        assert!(!entry.is_identified());
+        assert!(entry.has_inline_metadata());
+        assert!(entry.should_retain());
+    }
+
+    #[test]
+    fn directive_only_entry_is_not_retainable_without_url() {
+        let entry = M3uEntry {
+            stream_properties: {
+                let mut props = HashMap::new();
+                props.insert("inputstream".into(), "inputstream.adaptive".into());
+                props
+            },
+            ..Default::default()
+        };
+
+        assert!(!entry.has_inline_metadata());
+        assert!(!entry.should_retain());
     }
 
     #[test]

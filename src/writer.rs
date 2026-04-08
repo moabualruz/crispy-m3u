@@ -63,8 +63,8 @@ pub fn write(playlist: &M3uPlaylist) -> String {
 
     // Channel entries.
     for entry in &playlist.entries {
-        // Skip only entries that have neither a URL nor identifying metadata.
-        if !entry.has_url() && !entry.is_identified() {
+        // Skip entries that have neither a URL nor retainable inline metadata.
+        if !entry.should_retain() {
             continue;
         }
 
@@ -346,6 +346,39 @@ mod tests {
     }
 
     #[test]
+    fn write_preserves_extras_only_entries_without_url() {
+        let playlist = M3uPlaylist {
+            header: M3uHeader::default(),
+            entries: vec![M3uEntry {
+                extras: {
+                    let mut extras = std::collections::HashMap::new();
+                    extras.insert("Vendor-Key".to_string(), "value".to_string());
+                    extras
+                },
+                ..Default::default()
+            }],
+        };
+        let output = write(&playlist);
+
+        assert_eq!(output, "#EXTM3U\n#EXTINF:-1 Vendor-Key=\"value\",");
+    }
+
+    #[test]
+    fn write_preserves_known_metadata_only_entries_without_url() {
+        let playlist = M3uPlaylist {
+            header: M3uHeader::default(),
+            entries: vec![M3uEntry {
+                group_title: Some("News".into()),
+                groups: vec!["News".into()],
+                ..Default::default()
+            }],
+        };
+        let output = write(&playlist);
+
+        assert_eq!(output, "#EXTM3U\n#EXTINF:-1 group-title=\"News\",");
+    }
+
+    #[test]
     fn write_includes_extras() {
         let mut extras = std::collections::HashMap::new();
         extras.insert("custom".to_string(), "value".to_string());
@@ -441,6 +474,26 @@ http://example.com/stream"#;
             Some("value")
         );
         assert!(!written.contains("http://"));
+    }
+
+    #[test]
+    fn roundtrip_preserves_extras_only_entries_without_url() {
+        let original = r#"#EXTM3U
+#EXTINF:-1 Vendor-Key="value""#;
+
+        let parsed = crate::parse(original).unwrap();
+        let written = write(&parsed);
+        let reparsed = crate::parse(&written).unwrap();
+        let entry = &reparsed.entries[0];
+
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(reparsed.entries.len(), 1);
+        assert!(entry.urls.is_empty());
+        assert_eq!(
+            entry.extras.get("Vendor-Key").map(String::as_str),
+            Some("value")
+        );
+        assert_eq!(written, "#EXTM3U\n#EXTINF:-1 Vendor-Key=\"value\",");
     }
 
     #[test]

@@ -121,7 +121,7 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
                     // Carry forward properties accumulated before #EXTINF.
                     Some((entry.stream_properties, entry.vlc_options))
                 }
-                Some(entry) if entry.is_identified() => {
+                Some(entry) if entry.has_inline_metadata() => {
                     entries.push(entry);
                     None
                 }
@@ -275,7 +275,7 @@ impl Iterator for M3uEntryIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let Some(raw_line) = self.lines.next() else {
-                return self.current_entry.take().filter(M3uEntry::has_url);
+                return self.current_entry.take().filter(M3uEntry::should_retain);
             };
             let line = raw_line.trim();
 
@@ -284,11 +284,11 @@ impl Iterator for M3uEntryIter<'_> {
             }
 
             if let Some(rest) = line.strip_prefix("#EXTINF:") {
-                // If we have a pending entry with a URL, yield it first.
+                // If we have a pending supported entry, yield it first.
                 let to_yield = self
                     .current_entry
                     .take()
-                    .filter(super::types::M3uEntry::has_url);
+                    .filter(super::types::M3uEntry::should_retain);
 
                 let mut entry = M3uEntry::default();
                 parse_extinf(rest, &mut entry);
@@ -329,14 +329,10 @@ impl Iterator for M3uEntryIter<'_> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Flush the current entry into the entries vec if it has a URL.
+/// Flush the current entry into the entries vec if it should be retained.
 fn flush_entry(current: &mut Option<M3uEntry>, entries: &mut Vec<M3uEntry>) {
     if let Some(entry) = current.take() {
-        // The TS parser only adds an entry to channels[] when it encounters
-        // an HTTP URL line. Entries without URLs are discarded.
-        // However, some playlists have entries with just metadata, so we
-        // keep entries that have at least been identified.
-        if entry.has_url() || entry.is_identified() {
+        if entry.should_retain() {
             entries.push(entry);
         }
     }
@@ -990,6 +986,33 @@ https://stream.example.com/cnn
     }
 
     #[test]
+    fn parse_entry_without_url_is_kept_if_it_only_has_extras() {
+        let content = "#EXTM3U\n#EXTINF:-1 Vendor-Key=\"value\",\n";
+        let playlist = parse(content).unwrap();
+
+        assert_eq!(playlist.entries.len(), 1);
+        assert!(playlist.entries[0].urls.is_empty());
+        assert_eq!(
+            playlist.entries[0]
+                .extras
+                .get("Vendor-Key")
+                .map(String::as_str),
+            Some("value")
+        );
+    }
+
+    #[test]
+    fn parse_entry_without_url_is_kept_if_it_only_has_known_metadata() {
+        let content = "#EXTM3U\n#EXTINF:-1 group-title=\"News\",\n";
+        let playlist = parse(content).unwrap();
+
+        assert_eq!(playlist.entries.len(), 1);
+        assert!(playlist.entries[0].urls.is_empty());
+        assert_eq!(playlist.entries[0].group_title.as_deref(), Some("News"));
+        assert_eq!(playlist.entries[0].groups, vec!["News"]);
+    }
+
+    #[test]
     fn parse_iter_yields_entries() {
         let content = "#EXTM3U\n\
             #EXTINF:-1,Ch1\nhttp://example.com/1\n\
@@ -1006,6 +1029,40 @@ https://stream.example.com/cnn
         let entries: Vec<M3uEntry> = parse_iter(content).collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].primary_url(), Some("http://example.com/raw"));
+    }
+
+    #[test]
+    fn parse_iter_keeps_identified_entry_without_url() {
+        let content = "#EXTM3U\n#EXTINF:-1 tvg-id=\"ch1\",No URL Channel\n";
+        let entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name.as_deref(), Some("No URL Channel"));
+        assert!(entries[0].urls.is_empty());
+    }
+
+    #[test]
+    fn parse_iter_keeps_extras_only_entry_without_url() {
+        let content = "#EXTM3U\n#EXTINF:-1 Vendor-Key=\"value\",\n";
+        let entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].urls.is_empty());
+        assert_eq!(
+            entries[0].extras.get("Vendor-Key").map(String::as_str),
+            Some("value")
+        );
+    }
+
+    #[test]
+    fn parse_iter_keeps_known_metadata_only_entry_without_url() {
+        let content = "#EXTM3U\n#EXTINF:-1 group-title=\"News\",\n";
+        let entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].urls.is_empty());
+        assert_eq!(entries[0].group_title.as_deref(), Some("News"));
+        assert_eq!(entries[0].groups, vec!["News"]);
     }
 
     #[test]
