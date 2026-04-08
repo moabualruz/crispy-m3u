@@ -24,6 +24,7 @@ It focuses on the metadata commonly seen in real IPTV playlists, not just the mi
 - multi-URL entries and directive-backed metadata (`#KODIPROP`, `#EXTVLCOPT`, `#WEBPROP`)
 - deterministic serialization for map-backed metadata
 - safe attribute escaping for quotes, backslashes, and line breaks
+- case-insensitive matching for known attributes while preserving original key spelling for unknown extras
 
 ## Installation
 
@@ -77,6 +78,7 @@ assert!(output.starts_with("#EXTM3U"));
 - `stream_properties`, `vlc_options`, and `web_properties` are written back as directive lines
 - `groups` are normalized to a semicolon-delimited `group-title` on output
 - serialized `HashMap` metadata is sorted by key for deterministic output
+- unknown header and entry extras keep their original key casing across parse/write roundtrips
 
 ## Related Crates
 

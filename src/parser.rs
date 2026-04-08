@@ -348,7 +348,7 @@ fn parse_header_attrs(rest: &str, header: &mut M3uHeader) {
         } else if key_lower == HEADER_CATCHUP_SOURCE {
             header.catchup_source = Some(value);
         } else {
-            header.extras.insert(key_lower, value);
+            header.extras.insert(key, value);
         }
     }
 }
@@ -381,7 +381,7 @@ fn parse_extinf(rest: &str, entry: &mut M3uEntry) {
     let attrs = parse_attributes(attr_part);
     for (key, value) in attrs {
         let key_lower = key.to_ascii_lowercase();
-        set_entry_attribute(entry, &key_lower, value);
+        set_entry_attribute(entry, &key, &key_lower, value);
     }
 }
 
@@ -520,10 +520,10 @@ fn parse_quoted_attribute_value(s: &str, start: usize) -> (String, usize) {
 /// When `group-title` is set, also splits on semicolons to populate `groups`
 /// for multi-group support. Translated from pvr.iptvsimple's
 /// `ParseAndAddChannelGroups` which splits on `;`.
-fn set_entry_attribute(entry: &mut M3uEntry, key: &str, value: String) {
+fn set_entry_attribute(entry: &mut M3uEntry, key: &str, normalized_key: &str, value: String) {
     // Check known channel attributes.
     for &(attr_key, field_name) in KNOWN_CHANNEL_ATTRS {
-        if key == attr_key {
+        if normalized_key == attr_key {
             match field_name {
                 "tvg_id" => entry.tvg_id = Some(value),
                 "tvg_name" => entry.tvg_name = Some(value),
@@ -718,6 +718,48 @@ http://example.com/test
             Some("hello")
         );
         assert_eq!(ch.extras.get("another").map(String::as_str), Some("world"));
+    }
+
+    #[test]
+    fn parse_header_extras_preserve_original_key_casing() {
+        let content = r#"#EXTM3U X-TVG-URL="http://epg.com" Vendor-Key="one" MiXeD-Flag="two"
+"#;
+        let playlist = parse(content).unwrap();
+
+        assert_eq!(playlist.header.epg_url.as_deref(), Some("http://epg.com"));
+        assert_eq!(
+            playlist.header.extras.get("Vendor-Key").map(String::as_str),
+            Some("one")
+        );
+        assert_eq!(
+            playlist.header.extras.get("MiXeD-Flag").map(String::as_str),
+            Some("two")
+        );
+        assert!(!playlist.header.extras.contains_key("vendor-key"));
+        assert!(!playlist.header.extras.contains_key("mixed-flag"));
+    }
+
+    #[test]
+    fn parse_channel_extras_preserve_original_key_casing() {
+        let content = r#"#EXTM3U
+#EXTINF:-1 TVG-ID="ch1" GrOuP-TiTlE="News" Vendor-Key="hello" MiXeD-Flag="world",Test
+http://example.com/test
+"#;
+        let playlist = parse(content).unwrap();
+        let ch = &playlist.entries[0];
+
+        assert_eq!(ch.tvg_id.as_deref(), Some("ch1"));
+        assert_eq!(ch.group_title.as_deref(), Some("News"));
+        assert_eq!(
+            ch.extras.get("Vendor-Key").map(String::as_str),
+            Some("hello")
+        );
+        assert_eq!(
+            ch.extras.get("MiXeD-Flag").map(String::as_str),
+            Some("world")
+        );
+        assert!(!ch.extras.contains_key("vendor-key"));
+        assert!(!ch.extras.contains_key("mixed-flag"));
     }
 
     #[test]
@@ -1354,5 +1396,35 @@ http://example.com/ch
             ch.vlc_options.get("http-reconnect").map(String::as_str),
             Some("true")
         );
+    }
+
+    #[test]
+    fn mixed_case_unknown_extras_roundtrip_preserves_key_spelling() {
+        let content = r#"#EXTM3U X-TVG-URL="http://epg.com" Vendor-Key="header"
+#EXTINF:-1 TVG-ID="ch1" Vendor-Key="entry" MiXeD-Flag="enabled",Test
+http://example.com/test
+"#;
+
+        let parsed = parse(content).unwrap();
+        let written = crate::write(&parsed);
+        let reparsed = parse(&written).unwrap();
+        let ch = &reparsed.entries[0];
+
+        assert!(written.contains(r#"Vendor-Key="header""#));
+        assert!(written.contains(r#"Vendor-Key="entry""#));
+        assert!(written.contains(r#"MiXeD-Flag="enabled""#));
+        assert_eq!(
+            reparsed.header.extras.get("Vendor-Key").map(String::as_str),
+            Some("header")
+        );
+        assert_eq!(
+            ch.extras.get("Vendor-Key").map(String::as_str),
+            Some("entry")
+        );
+        assert_eq!(
+            ch.extras.get("MiXeD-Flag").map(String::as_str),
+            Some("enabled")
+        );
+        assert_eq!(ch.tvg_id.as_deref(), Some("ch1"));
     }
 }
