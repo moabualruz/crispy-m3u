@@ -56,7 +56,7 @@ assert!(output.starts_with("#EXTM3U"));
 - `parse()` uses `ParseMode::Permissive` to accept common headerless IPTV playlists.
 - `parse_strict()` requires `#EXTM3U` as the first non-empty line.
 - `parse_with_mode()` lets callers choose explicitly.
-- only the first non-empty `#EXTM3U` line is treated as playlist header metadata; later `#EXTM3U` lines are ignored like other stray directives
+- in permissive parsing, a preamble `#EXTM3U` still counts as the playlist header even if earlier skipped comments or stray directives appear first; once playlist content starts, later `#EXTM3U` lines are ignored like other stray directives
 - `parse_iter()` preserves the same supported entry shapes as `parse()`, including retained URL-less `#EXTINF` entries, carried pre-`#EXTINF` `#KODIPROP`/`#EXTVLCOPT` state, `#WEBPROP` attached after `#EXTINF`, `#EXTGRP`-applied groups, and header catchup defaults on both `#EXTINF`-backed and bare URL-only entries.
 - bare URL lines are accepted as URL-only entries
 

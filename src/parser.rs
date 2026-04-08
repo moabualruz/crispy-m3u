@@ -103,6 +103,9 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
             if matches!(mode, ParseMode::Strict) {
                 return Err(M3uError::MissingHeader);
             }
+            if is_harmless_preamble_directive(line) {
+                continue;
+            }
             header_seen = true;
         }
 
@@ -233,10 +236,11 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
 /// the iterator variant, but supported entry retention matches [`parse()`],
 /// including pre-`#EXTINF` `#KODIPROP`/`#EXTVLCOPT` state, `#WEBPROP` lines
 /// attached after `#EXTINF`, `#EXTGRP`-applied groups, and header catchup
-/// defaults, including raw URL-only entries. Only the first non-empty
-/// `#EXTM3U` line is treated as a header; later `#EXTM3U` lines are ignored
-/// like other stray directives. Orphan directive-only state without an
-/// `#EXTINF` context is still ignored.
+/// defaults, including raw URL-only entries. A preamble `#EXTM3U` is still
+/// treated as the header even if earlier skipped comment/stray-directive lines
+/// appear before it, but once playlist content starts, later `#EXTM3U` lines
+/// are ignored like other stray directives. Orphan directive-only state
+/// without an `#EXTINF` context is still ignored.
 pub fn parse_iter(content: &str) -> M3uEntryIter<'_> {
     // Strip UTF-8 BOM if present.
     let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
@@ -294,6 +298,9 @@ impl Iterator for M3uEntryIter<'_> {
                 if let Some(rest) = line.strip_prefix("#EXTM3U") {
                     parse_header_attrs(rest, &mut self.header);
                     self.header_seen = true;
+                    continue;
+                }
+                if is_harmless_preamble_directive(line) {
                     continue;
                 }
 
@@ -723,6 +730,16 @@ fn should_accept_url_line(entry: Option<&M3uEntry>, has_extinf_context: bool) ->
     has_extinf_context || entry.is_some_and(M3uEntry::is_identified)
 }
 
+fn is_harmless_preamble_directive(line: &str) -> bool {
+    line.starts_with('#')
+        && !line.starts_with("#EXTINF:")
+        && !line.starts_with("#KODIPROP:")
+        && !line.starts_with("#EXTVLCOPT:")
+        && !line.starts_with("#EXTVLCOPT--")
+        && !line.starts_with("#WEBPROP:")
+        && !line.starts_with("#EXTGRP:")
+}
+
 /// Check if a line looks like a stream URL.
 fn is_url(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
@@ -1138,6 +1155,44 @@ http://example.com/raw
     }
 
     #[test]
+    fn parse_accepts_header_after_harmless_preamble_directives() {
+        let content = r#"#EXT-X-VERSION:3
+# preamble comment
+#EXTM3U catchup="shift" catchup-days="7"
+http://example.com/raw
+"#;
+        let playlist = parse(content).unwrap();
+
+        assert_eq!(playlist.header.catchup.as_deref(), Some("shift"));
+        assert_eq!(playlist.header.catchup_days.as_deref(), Some("7"));
+        assert_eq!(playlist.entries.len(), 1);
+        assert_eq!(
+            playlist.entries[0].primary_url(),
+            Some("http://example.com/raw")
+        );
+        assert_eq!(playlist.entries[0].catchup.as_deref(), Some("shift"));
+        assert_eq!(playlist.entries[0].catchup_days.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn parse_iter_matches_parse_when_header_follows_harmless_preamble_directives() {
+        let content = r#"#EXT-X-VERSION:3
+# preamble comment
+#EXTM3U catchup="shift" catchup-days="7"
+http://example.com/raw
+"#;
+        let parsed = parse(content).unwrap();
+        let iter_entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(parsed.header.catchup.as_deref(), Some("shift"));
+        assert_eq!(parsed.header.catchup_days.as_deref(), Some("7"));
+        assert_eq!(
+            serde_json::to_value(&iter_entries).unwrap(),
+            serde_json::to_value(&parsed.entries).unwrap()
+        );
+    }
+
+    #[test]
     fn parse_ignores_late_extm3u_header_after_playlist_start() {
         let content = r#"#EXTM3U
 http://example.com/raw
@@ -1350,6 +1405,13 @@ http://example.com/ch
     #[test]
     fn parse_strict_requires_header() {
         let content = "#EXTINF:-1,No Header\nhttp://example.com/no-header\n";
+        let error = parse_strict(content).unwrap_err();
+        assert!(matches!(error, M3uError::MissingHeader));
+    }
+
+    #[test]
+    fn parse_strict_rejects_harmless_preamble_before_header() {
+        let content = "# comment\n#EXTM3U\nhttp://example.com/raw\n";
         let error = parse_strict(content).unwrap_err();
         assert!(matches!(error, M3uError::MissingHeader));
     }
