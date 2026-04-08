@@ -219,7 +219,7 @@ pub fn parse_with_mode(content: &str, mode: ParseMode) -> Result<M3uPlaylist, M3
     }
 
     // Flush any trailing entry.
-    flush_entry(&mut current_entry, &mut entries);
+    flush_entry(&mut current_entry, current_entry_has_extinf, &mut entries);
 
     // Post-processing: apply header-level catchup inheritance.
     // Translated from pvr.iptvsimple: "If we still don't have a value use
@@ -265,8 +265,8 @@ pub struct M3uEntryIter<'a> {
 }
 
 impl M3uEntryIter<'_> {
-    fn finalize_entry(&self, mut entry: M3uEntry) -> Option<M3uEntry> {
-        if !entry.should_retain() {
+    fn finalize_entry(&self, mut entry: M3uEntry, has_extinf_context: bool) -> Option<M3uEntry> {
+        if !should_retain_parser_entry(&entry, has_extinf_context) {
             return None;
         }
         apply_header_catchup_to_entry(&self.header, &mut entry);
@@ -276,7 +276,7 @@ impl M3uEntryIter<'_> {
     fn take_retainable_entry(&mut self) -> Option<M3uEntry> {
         self.current_entry
             .take()
-            .and_then(|entry| self.finalize_entry(entry))
+            .and_then(|entry| self.finalize_entry(entry, self.current_entry_has_extinf))
     }
 }
 
@@ -310,7 +310,7 @@ impl Iterator for M3uEntryIter<'_> {
             if let Some(rest) = line.strip_prefix("#EXTINF:") {
                 let (to_yield, carried_props) =
                     transition_pending_entry_for_extinf(&mut self.current_entry);
-                let to_yield = to_yield.and_then(|entry| self.finalize_entry(entry));
+                let to_yield = to_yield.and_then(|entry| self.finalize_entry(entry, true));
 
                 let mut entry = M3uEntry::default();
                 parse_extinf(rest, &mut entry);
@@ -377,7 +377,7 @@ impl Iterator for M3uEntryIter<'_> {
             if is_url(line) && self.current_entry.is_none() && !self.current_entry_has_extinf {
                 let mut entry = M3uEntry::default();
                 entry.urls.push(line.to_string());
-                return self.finalize_entry(entry);
+                return self.finalize_entry(entry, false);
             }
 
             if is_url(line)
@@ -400,9 +400,13 @@ impl Iterator for M3uEntryIter<'_> {
 // ---------------------------------------------------------------------------
 
 /// Flush the current entry into the entries vec if it should be retained.
-fn flush_entry(current: &mut Option<M3uEntry>, entries: &mut Vec<M3uEntry>) {
+fn flush_entry(
+    current: &mut Option<M3uEntry>,
+    has_extinf_context: bool,
+    entries: &mut Vec<M3uEntry>,
+) {
     if let Some(entry) = current.take() {
-        if entry.should_retain() {
+        if should_retain_parser_entry(&entry, has_extinf_context) {
             entries.push(entry);
         }
     }
@@ -425,6 +429,12 @@ fn transition_pending_entry_for_extinf(
         Some(entry) if entry.has_inline_metadata() => (Some(entry), None),
         _ => (None, None),
     }
+}
+
+fn should_retain_parser_entry(entry: &M3uEntry, has_extinf_context: bool) -> bool {
+    entry.has_url()
+        || entry.has_inline_metadata()
+        || (has_extinf_context && !entry.web_properties.is_empty())
 }
 
 fn apply_extgrp_groups(entry: &mut M3uEntry, extgrp_groups: &[String]) {
@@ -1120,6 +1130,30 @@ https://stream.example.com/cnn
     }
 
     #[test]
+    fn parse_entry_without_url_is_kept_if_it_only_has_web_properties() {
+        let content = "#EXTM3U\n#EXTINF:-1,\n#WEBPROP:web-player=html5\n";
+        let playlist = parse(content).unwrap();
+
+        assert_eq!(playlist.entries.len(), 1);
+        assert!(playlist.entries[0].urls.is_empty());
+        assert_eq!(
+            playlist.entries[0]
+                .web_properties
+                .get("web-player")
+                .map(String::as_str),
+            Some("html5")
+        );
+    }
+
+    #[test]
+    fn parse_ignores_orphan_webprop_without_extinf_context() {
+        let content = "#EXTM3U\n#WEBPROP:web-player=html5\n";
+        let playlist = parse(content).unwrap();
+
+        assert!(playlist.entries.is_empty());
+    }
+
+    #[test]
     fn parse_iter_yields_entries() {
         let content = "#EXTM3U\n\
             #EXTINF:-1,Ch1\nhttp://example.com/1\n\
@@ -1272,6 +1306,30 @@ http://example.com/2
         assert!(entries[0].urls.is_empty());
         assert_eq!(entries[0].group_title.as_deref(), Some("News"));
         assert_eq!(entries[0].groups, vec!["News"]);
+    }
+
+    #[test]
+    fn parse_iter_keeps_webprop_only_entry_without_url() {
+        let content = "#EXTM3U\n#EXTINF:-1,\n#WEBPROP:web-player=html5\n";
+        let entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].urls.is_empty());
+        assert_eq!(
+            entries[0]
+                .web_properties
+                .get("web-player")
+                .map(String::as_str),
+            Some("html5")
+        );
+    }
+
+    #[test]
+    fn parse_iter_ignores_orphan_webprop_without_extinf_context() {
+        let content = "#EXTM3U\n#WEBPROP:web-player=html5\n";
+        let entries: Vec<M3uEntry> = parse_iter(content).collect();
+
+        assert!(entries.is_empty());
     }
 
     #[test]

@@ -80,7 +80,7 @@ assert!(output.starts_with("#EXTM3U"));
 - all URLs in `entry.urls` are serialized, not just the first one
 - `stream_properties`, `vlc_options`, and `web_properties` are written back as directive lines
 - `groups` are normalized to a semicolon-delimited `group-title` on output
-- URL-less entries are written back when they carry retainable `#EXTINF` metadata, including known attributes and unknown extras
+- URL-less entries are written back when they carry retainable metadata, including known `#EXTINF` attributes, unknown extras, and supported `#WEBPROP` state
 - orphan directive-only lines without an `#EXTINF` context are still ignored
 - `parse_iter()` follows the same supported-retention rule, so collected iterator entries match `parse()` for retainable entry shapes, including bare URL-only entries that inherit header catchup defaults
 - serialized `HashMap` metadata is sorted by key for deterministic output

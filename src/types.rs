@@ -215,7 +215,7 @@ impl M3uEntry {
 
     /// Returns `true` when the entry should be preserved by parse/write flows.
     pub fn should_retain(&self) -> bool {
-        self.has_url() || self.has_inline_metadata()
+        self.has_url() || self.has_inline_metadata() || !self.web_properties.is_empty()
     }
 }
 
@@ -396,6 +396,21 @@ mod tests {
 
         assert!(!entry.has_inline_metadata());
         assert!(!entry.should_retain());
+    }
+
+    #[test]
+    fn web_properties_only_entry_is_retainable() {
+        let entry = M3uEntry {
+            web_properties: {
+                let mut props = HashMap::new();
+                props.insert("web-player".into(), "html5".into());
+                props
+            },
+            ..Default::default()
+        };
+
+        assert!(!entry.has_inline_metadata());
+        assert!(entry.should_retain());
     }
 
     #[test]
