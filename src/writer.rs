@@ -242,7 +242,7 @@ fn sorted_pairs(map: &HashMap<String, String>) -> Vec<(&str, &str)> {
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    pairs.sort_unstable_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+    pairs.sort_unstable_by_key(|(key, _)| *key);
     pairs
 }
 
