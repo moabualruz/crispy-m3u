@@ -330,12 +330,8 @@ where
     let mut urls = SmallVec::new();
 
     match value {
-        None => {}
-        Some(UrlField::Single(url)) => {
-            if !url.trim().is_empty() {
-                urls.push(url);
-            }
-        }
+        Some(UrlField::Single(url)) if !url.trim().is_empty() => urls.push(url),
+        None | Some(UrlField::Single(_)) => {}
         Some(UrlField::Multiple(values)) => {
             urls.extend(values.into_iter().filter(|value| !value.trim().is_empty()));
         }
